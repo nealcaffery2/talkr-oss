@@ -15,11 +15,11 @@
   "dependencies": {
     "@fastify/cors": "^11.3.0",
     "@fastify/formbody": "^8.0.0",
-    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@modelcontextprotocol/sdk": "^1.31.0",
     "@talkr/core": "*",
     "@talkr/db": "*",
     "@talkr/provider-telnyx": "*",
-    "fastify": "^5.0.0",
+    "fastify": "^5.12.5",
     "jose": "^6.0.0",
     "pino": "^9.5.0",
     "zod": "^3.24.0"
@@ -27,6 +27,6 @@
   "devDependencies": {
     "@types/pg": "^8.11.0",
     "pg": "^8.13.0",
-    "esbuild": "^0.25.0"
+    "esbuild": "^0.28.2"
   }
 }

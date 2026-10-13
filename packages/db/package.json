@@ -10,7 +10,7 @@
   },
   "dependencies": {
     "@talkr/core": "*",
-    "drizzle-orm": "^0.44.0",
+    "drizzle-orm": "^0.45.4",
     "pg": "^8.13.0"
   },
   "devDependencies": {
