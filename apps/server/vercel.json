@@ -1,0 +1,25 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "installCommand": "cd ../.. && npm ci --include=dev --no-audit --no-fund && cd apps/server && MINIFY=1 node scripts/bundle-serverless.mjs --inplace",
+  "buildCommand": "test -f api/index.mjs",
+  "outputDirectory": "public",
+  "functions": {
+    "api/index.mjs": {
+      "maxDuration": 60,
+      "includeFiles": "{config,migrations}/**"
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/(.*)",
+      "destination": "/api/index"
+    }
+  ],
+  "crons": [
+    {
+      "path": "/internal/tick",
+      "schedule": "* * * * *"
+    }
+  ]
+}

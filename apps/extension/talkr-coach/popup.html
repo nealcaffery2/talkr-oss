@@ -1,0 +1,67 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Talkr Coach</title>
+    <style>
+      :root {
+        --orange: #f97316; --bg: #0f172a; --bg-2: #1e293b;
+        --fg: #f8fafc; --muted: #94a3b8;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0; padding: 14px; width: 320px;
+        background: var(--bg); color: var(--fg);
+        font: 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      h1 { font-size: 13px; margin: 0 0 10px; color: var(--orange); letter-spacing: 0.04em; }
+      label { display: block; font-size: 11px; color: var(--muted); margin: 8px 0 3px; }
+      input {
+        width: 100%; padding: 6px 8px;
+        background: var(--bg-2); color: var(--fg); border: 1px solid #334155;
+        border-radius: 4px; font: inherit;
+      }
+      input:focus { outline: 2px solid var(--orange); }
+      .row { display: flex; gap: 6px; margin-top: 10px; }
+      button {
+        flex: 1; padding: 8px; font: inherit; font-weight: 600;
+        background: var(--orange); color: var(--bg); border: 0;
+        border-radius: 4px; cursor: pointer;
+      }
+      button.secondary { background: var(--bg-2); color: var(--fg); border: 1px solid #334155; }
+      button:disabled { opacity: 0.4; cursor: not-allowed; }
+      #status {
+        margin-top: 10px; padding: 6px 8px; font-size: 11px;
+        background: rgba(249,115,22,0.1); border-left: 2px solid var(--orange);
+        color: var(--muted); min-height: 14px;
+      }
+      .timer { font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums; margin-top: 8px; text-align: center; }
+      details { margin-top: 12px; }
+      summary { cursor: pointer; font-size: 11px; color: var(--muted); }
+    </style>
+  </head>
+  <body>
+    <h1>TALKR COACH</h1>
+    <div id="timer" class="timer"></div>
+    <div class="row">
+      <button id="start">Start session</button>
+      <button id="stop" class="secondary" style="display:none;">Stop</button>
+    </div>
+    <div id="status"></div>
+
+    <details id="settings-block">
+      <summary>Settings</summary>
+      <label for="api-base">API base URL</label>
+      <input id="api-base" placeholder="http://localhost:3000 or https://your-app.vercel.app" />
+      <label for="api-key">Talkr API key</label>
+      <input id="api-key" type="password" placeholder="paste TALKR_API_KEY" />
+      <label for="agent-id">Agent ID (Supabase user uuid)</label>
+      <input id="agent-id" placeholder="your supabase user uuid" />
+      <div class="row" style="margin-top: 10px;">
+        <button id="save-settings" class="secondary">Save settings</button>
+      </div>
+    </details>
+
+    <script src="popup.js"></script>
+  </body>
+</html>

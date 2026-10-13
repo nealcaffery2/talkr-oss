@@ -1,0 +1,57 @@
+{
+  "manifest_version": 3,
+  "name": "Talkr",
+  "version": "0.2.2",
+  "description": "Cloud dialer: dial, text, and run the call from any tab. Click any phone number on any page to call it.",
+  "minimum_chrome_version": "116",
+  "permissions": [
+    "offscreen",
+    "storage",
+    "sidePanel",
+    "contextMenus",
+    "tabs",
+    "identity"
+  ],
+  "host_permissions": [
+    "http://localhost:4000/*",
+    "https://*.vercel.app/*",
+    "https://*.up.railway.app/*",
+    "https://*.fly.dev/*",
+    "https://*.onrender.com/*"
+  ],
+  "background": {
+    "service_worker": "service-worker.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": true,
+      "match_about_blank": false
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Talkr",
+    "default_icon": {
+      "16": "icons/16.png",
+      "32": "icons/32.png",
+      "48": "icons/48.png",
+      "128": "icons/128.png"
+    }
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'"
+  },
+  "icons": {
+    "16": "icons/16.png",
+    "32": "icons/32.png",
+    "48": "icons/48.png",
+    "128": "icons/128.png"
+  }
+}

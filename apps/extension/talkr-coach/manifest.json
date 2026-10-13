@@ -1,0 +1,42 @@
+{
+  "manifest_version": 3,
+  "name": "Talkr Coach",
+  "version": "0.1.0",
+  "description": "Real-time sales coaching for calls placed from a web dialer.",
+  "permissions": [
+    "tabCapture",
+    "offscreen",
+    "storage",
+    "scripting",
+    "alarms",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "https://*.smrtphone.io/*",
+    "https://*.smrtphone.com/*",
+    "https://api.deepgram.com/*",
+    "https://*.vercel.app/*",
+    "http://localhost:3000/*"
+  ],
+  "background": {
+    "service_worker": "service_worker.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://*.smrtphone.io/*", "https://*.smrtphone.com/*"],
+      "js": ["content_script.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Talkr Coach"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["overlay.html", "overlay.js", "overlay.css"],
+      "matches": ["https://*.smrtphone.io/*", "https://*.smrtphone.com/*"]
+    }
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "functions": {
+    "api/suggest.ts": {
+      "maxDuration": 30,
+      "memory": 1024
+    },
+    "api/deepgram-token.ts": {
+      "maxDuration": 5
+    },
+    "api/session.ts": {
+      "maxDuration": 5
+    }
+  },
+  "headers": [
+    {
+      "source": "/api/(.*)",
+      "headers": [
+        { "key": "access-control-allow-origin", "value": "*" },
+        { "key": "access-control-allow-methods", "value": "POST, OPTIONS" },
+        { "key": "access-control-allow-headers", "value": "authorization, content-type, x-agent-id" }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,5 @@
+# Built output. Run `npm run build` and load dist/ unpacked
+# (chrome://extensions → Load unpacked → this folder/dist).
+dist/
+talkr-store.zip
+talkr-voice.zip

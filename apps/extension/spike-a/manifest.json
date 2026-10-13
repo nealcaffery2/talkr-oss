@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "Talkr Spike A: Tab + Mic WAV Capture",
+  "version": "0.2.0",
+  "description": "Day-1 spike. Captures the active tab's audio and the mic in parallel, saves each as a WAV. Used to verify whether smrtPhone tab audio contains both call legs or only the seller.",
+  "permissions": [
+    "tabCapture",
+    "offscreen",
+    "downloads",
+    "activeTab",
+    "scripting",
+    "storage"
+  ],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "service_worker.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Talkr Spike A"
+  }
+}

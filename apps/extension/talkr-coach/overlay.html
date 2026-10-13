@@ -1,0 +1,27 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Talkr Coach Overlay</title>
+    <link rel="stylesheet" href="overlay.css" />
+  </head>
+  <body>
+    <div id="card">
+      <div id="header">
+        <span id="title">Talkr</span>
+        <span id="stage-pill">listening</span>
+        <button id="close" title="Hide overlay">×</button>
+      </div>
+      <div id="suggestion">Waiting for the seller to speak...</div>
+      <div id="meta"></div>
+      <div id="actions">
+        <button class="action used" data-action="used">Used</button>
+        <button class="action partial" data-action="partial">Partial</button>
+        <button class="action wrong" data-action="wrong">Wrong</button>
+        <button class="action dismiss" data-action="dismissed">Dismiss</button>
+      </div>
+      <div id="last-utterance"></div>
+    </div>
+    <script src="overlay.js"></script>
+  </body>
+</html>

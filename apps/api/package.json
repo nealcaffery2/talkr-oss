@@ -1,0 +1,37 @@
+{
+  "name": "@talkr/api",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Talkr backend: smrtPhone ingest, transcription, pattern extraction, call review, live suggest.",
+  "type": "module",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "dev": "vercel dev",
+    "build": "echo 'no build needed; api routes are deployed as serverless functions'",
+    "vercel-build": "echo 'skip'",
+    "typecheck": "tsc --noEmit",
+    "deploy": "vercel deploy --prod",
+    "process": "node --env-file=.env.local --import tsx scripts/process-call.ts",
+    "youtube": "node --env-file=.env.local --import tsx scripts/process-youtube.ts",
+    "playbook": "node --env-file=.env.local --import tsx scripts/process-playbook.ts",
+    "retrieve": "node --env-file=.env.local --import tsx scripts/retrieve.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.40.0",
+    "@deepgram/sdk": "^3.10.0",
+    "@supabase/supabase-js": "^2.47.0",
+    "mammoth": "^1.8.0",
+    "pdf-parse": "^1.1.1",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/pdf-parse": "^1.1.4",
+    "@vercel/node": "^5.0.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.0",
+    "vercel": "^39.0.0"
+  }
+}

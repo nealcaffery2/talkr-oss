@@ -1,0 +1,94 @@
+:root {
+  --orange: #f97316;
+  --orange-dim: #c2410c;
+  --bg: #0f172a;
+  --bg-2: #1e293b;
+  --fg: #f8fafc;
+  --muted: #94a3b8;
+  --green: #86efac;
+  --red: #fca5a5;
+}
+* { box-sizing: border-box; }
+html, body {
+  margin: 0; padding: 0; height: 100%; width: 100%;
+  background: transparent;
+  font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: var(--fg);
+}
+#card {
+  height: 100%; width: 100%;
+  background: rgba(15, 23, 42, 0.95);
+  backdrop-filter: blur(8px);
+  border-radius: 10px;
+  border-left: 3px solid var(--orange);
+  display: flex; flex-direction: column;
+  padding: 10px 12px;
+  overflow: hidden;
+}
+#header {
+  display: flex; align-items: center; gap: 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+}
+#title {
+  font-weight: 700; letter-spacing: 0.04em; color: var(--orange);
+  font-size: 12px;
+}
+#stage-pill {
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: rgba(249, 115, 22, 0.15);
+  color: var(--orange);
+  letter-spacing: 0.04em;
+}
+#close {
+  margin-left: auto;
+  background: none; border: 0; color: var(--muted);
+  font-size: 18px; cursor: pointer; padding: 0 4px;
+}
+#close:hover { color: var(--fg); }
+#suggestion {
+  flex: 1;
+  padding: 10px 0;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.4;
+  color: var(--fg);
+  overflow: auto;
+}
+#suggestion.waiting { color: var(--muted); font-style: italic; }
+#suggestion.error { color: var(--red); font-weight: 400; font-size: 12px; }
+#suggestion.pass { color: var(--muted); font-weight: 400; }
+#meta {
+  font-size: 10px; color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  margin-bottom: 6px;
+  min-height: 12px;
+}
+#actions {
+  display: flex; gap: 4px;
+}
+.action {
+  flex: 1;
+  padding: 5px 6px;
+  font-size: 11px;
+  font-weight: 600;
+  background: var(--bg-2);
+  color: var(--muted);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.action:hover { color: var(--fg); border-color: var(--orange); }
+.action.used:hover { color: var(--green); border-color: var(--green); }
+.action.wrong:hover { color: var(--red); border-color: var(--red); }
+.action.acknowledged { opacity: 0.4; cursor: default; }
+#last-utterance {
+  font-size: 10px; color: var(--muted);
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(255,255,255,0.08);
+  max-height: 36px; overflow: hidden;
+  font-style: italic;
+}

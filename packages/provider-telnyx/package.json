@@ -1,0 +1,14 @@
+{
+  "name": "@talkr/provider-telnyx",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Telnyx adapter: Ed25519 webhook validation, TeXML call control, telephony-credential tokens, calls/conference/messaging REST.",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@talkr/core": "*"
+  }
+}

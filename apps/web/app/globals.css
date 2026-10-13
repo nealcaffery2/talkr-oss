@@ -1,0 +1,349 @@
+@import 'tailwindcss';
+
+/**
+ * The Talkr design system, re-keyed to the Talkr
+ * brand: the accent is the logo's red rather than blue.
+ *
+ * The app is calm and near-white; a single brand red is the only interactive
+ * accent; near-black carries the offer and, here, the live call. Status is
+ * de-pilled — a 6px square swatch plus an uppercase label, never a colored
+ * pill. Buttons are 10px-radius rectangles, not pills.
+ *
+ * The original token names (--bg/--panel/--line/--accent/…) are kept because
+ * every existing page already speaks them, so re-pointing them here re-skins
+ * reports, floor, workflows, tasks and campaigns in the same pass.
+ */
+:root {
+  /* Surfaces */
+  --bg: #fafafa;
+  --panel: #ffffff;
+  --panel-2: #f4f4f5;
+  --line: #e4e4e7;
+  --line-soft: #f0f0f1;
+  /* One step darker than --line: the border a lifted card reveals on hover. */
+  --line-hover: #d4d4d8;
+
+  /* Ink */
+  --text: #18181b;
+  --muted: #71717a;
+  --muted-2: #a1a1aa;
+  --ink: #111111;
+
+  /* Brand: Talkr Red (brand/README.md). The only interactive accent. */
+  --accent: #ff233b;
+  --accent-hover: #e6142e;
+  --accent-soft: #ffe9ec;
+  --accent-light: #ff6b7c;
+  --orange: #ff7a45;
+
+  /* Semantic */
+  --green: #16a34a;
+  --green-hover: #15803d;
+  --red: #dc2626;
+  --red-hover: #b91c1c;
+  --amber: #d97706;
+
+  /* Dark surfaces used inside the call hero */
+  --dark-1: #18181b;
+  --dark-2: #27272a;
+  --dark-3: #3f3f46;
+
+  /* Radii — 10 / 12 / 14 / 18 / 20 */
+  --r-btn: 10px;
+  --r-md: 12px;
+  --r-card: 14px;
+  --r-lg: 18px;
+
+  /* Shadows: soft rest, lift on hover, blue "pop" on focus */
+  --shadow-rest: 0 1px 2px rgba(24, 24, 27, 0.04), 0 1px 3px rgba(24, 24, 27, 0.06);
+  --shadow-lift: 0 8px 24px rgba(24, 24, 27, 0.1);
+  --shadow-pop: 0 0 0 3px rgba(255, 35, 59, 0.12);
+}
+
+/*
+ * Inter ships with the app. Reps' machines cannot be assumed to have it
+ * installed, and without it every surface falls back to the browser's serif —
+ * so the variable font is served from /public and registered under the plain
+ * family name every style in the app already uses.
+ */
+@font-face {
+  font-family: Inter;
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('/fonts/inter-latin-wght-normal.woff2') format('woff2-variations');
+}
+
+html,
+body {
+  background: var(--bg);
+  color: var(--text);
+}
+
+body {
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
+  /* Tabular + slashed zero everywhere: money and timers must not jitter as
+     they recompute (design system, "Numbers are the message"). */
+  font-variant-numeric: tabular-nums slashed-zero;
+}
+
+/*
+ * Scrollbars: thin, and invisible until the pointer is over the thing that
+ * scrolls. A rep looks at these panes for eight hours; a permanent grey slab
+ * down the side of every list is eight hours of noise.
+ *
+ * The track keeps its width at rest and only the *thumb* fades in. A bar that
+ * literally grows from 0 to 8px on hover reflows the content beside it, and a
+ * list that shifts sideways under the cursor is worse than a visible
+ * scrollbar. Firefox gets the same effect through `scrollbar-color`.
+ *
+ * Scoped to the app's own scroll containers — every one of them is a Tailwind
+ * `overflow-*-auto` box — so native controls (selects, date pickers, the
+ * document itself on a small screen) keep the scrollbars the OS gave them.
+ */
+[class~='overflow-auto'],
+[class~='overflow-y-auto'],
+[class~='overflow-x-auto'],
+.scroll-thin {
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+  transition: scrollbar-color 0.16s ease;
+}
+
+[class~='overflow-auto']:hover,
+[class~='overflow-y-auto']:hover,
+[class~='overflow-x-auto']:hover,
+[class~='overflow-auto']:focus-within,
+[class~='overflow-y-auto']:focus-within,
+[class~='overflow-x-auto']:focus-within,
+.scroll-thin:hover,
+.scroll-thin:focus-within {
+  scrollbar-color: rgba(113, 113, 122, 0.35) transparent;
+}
+
+[class~='overflow-auto']::-webkit-scrollbar,
+[class~='overflow-y-auto']::-webkit-scrollbar,
+[class~='overflow-x-auto']::-webkit-scrollbar,
+.scroll-thin::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+
+[class~='overflow-auto']::-webkit-scrollbar-track,
+[class~='overflow-y-auto']::-webkit-scrollbar-track,
+[class~='overflow-x-auto']::-webkit-scrollbar-track,
+.scroll-thin::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Styling ::-webkit-scrollbar at all makes Chromium draw its stepper arrows;
+   they are the loudest part of the old scrollbar, so they go first. */
+[class~='overflow-auto']::-webkit-scrollbar-button,
+[class~='overflow-y-auto']::-webkit-scrollbar-button,
+[class~='overflow-x-auto']::-webkit-scrollbar-button,
+.scroll-thin::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+/* `background-clip: content-box` over a transparent border is what makes the
+   thumb 5px wide inside a 9px gutter without moving anything. */
+[class~='overflow-auto']::-webkit-scrollbar-thumb,
+[class~='overflow-y-auto']::-webkit-scrollbar-thumb,
+[class~='overflow-x-auto']::-webkit-scrollbar-thumb,
+.scroll-thin::-webkit-scrollbar-thumb {
+  background-color: transparent;
+  border: 2px solid transparent;
+  background-clip: content-box;
+  border-radius: 9px;
+  transition: background-color 0.16s ease;
+}
+
+[class~='overflow-auto']:hover::-webkit-scrollbar-thumb,
+[class~='overflow-y-auto']:hover::-webkit-scrollbar-thumb,
+[class~='overflow-x-auto']:hover::-webkit-scrollbar-thumb,
+[class~='overflow-auto']:focus-within::-webkit-scrollbar-thumb,
+[class~='overflow-y-auto']:focus-within::-webkit-scrollbar-thumb,
+[class~='overflow-x-auto']:focus-within::-webkit-scrollbar-thumb,
+.scroll-thin:hover::-webkit-scrollbar-thumb,
+.scroll-thin:focus-within::-webkit-scrollbar-thumb {
+  background-color: rgba(113, 113, 122, 0.3);
+}
+
+[class~='overflow-auto']::-webkit-scrollbar-thumb:hover,
+[class~='overflow-y-auto']::-webkit-scrollbar-thumb:hover,
+[class~='overflow-x-auto']::-webkit-scrollbar-thumb:hover,
+.scroll-thin::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(113, 113, 122, 0.55);
+}
+
+[class~='overflow-auto']::-webkit-scrollbar-corner,
+[class~='overflow-y-auto']::-webkit-scrollbar-corner,
+[class~='overflow-x-auto']::-webkit-scrollbar-corner,
+.scroll-thin::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* Display type is tracked in; body is not. */
+.display {
+  letter-spacing: -0.03em;
+}
+
+/* Eyebrow / KPI caption: the only uppercase in the system. */
+.eyebrow {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted-2);
+}
+
+/* Motion: quick and physical — no bounces, no decorative loops. */
+@keyframes ringpulse {
+  0% {
+    transform: scale(1);
+    opacity: 0.45;
+  }
+  70%,
+  100% {
+    transform: scale(1.5);
+    opacity: 0;
+  }
+}
+
+@keyframes typingdot {
+  0%,
+  60%,
+  100% {
+    transform: translateY(0);
+    opacity: 0.35;
+  }
+  30% {
+    transform: translateY(-3px);
+    opacity: 0.9;
+  }
+}
+
+@keyframes bluepulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+/*
+ * Hover lift — the one interactive-surface treatment.
+ *
+ * `.lift` is for a card the whole of which is a control: one pixel up, the
+ * rest shadow, and a border that comes forward. One pixel is deliberate — a
+ * card that jumps is a card a rep notices instead of reads, and the transform
+ * only ever runs while the cursor is on it, never on a render.
+ *
+ * `.lift-row` is the same idea for a dense clickable row (a call in the recent
+ * list, a contact in a search result). Rows do NOT translate: shifting one row
+ * inside a scrolling list is the jitter this is supposed to avoid, so they get
+ * the background and the border instead.
+ *
+ * Both are behind a fine-pointer query: on touch there is no hover, and a
+ * sticky :hover left behind by a tap is worse than nothing.
+ */
+.lift,
+.lift-row {
+  transition:
+    transform 0.13s cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 0.13s ease,
+    border-color 0.13s ease,
+    background-color 0.13s ease;
+}
+
+/* Rows on the near-black call surfaces need the inverse of the same idea. */
+.lift-row {
+  --lift-bg: var(--panel-2);
+  --lift-line: var(--line-hover);
+}
+
+.lift-row.on-dark {
+  --lift-bg: rgba(255, 255, 255, 0.06);
+  --lift-line: var(--dark-3);
+}
+
+/*
+ * `!important` on the colour declarations only, and only here. This design
+ * system writes its resting colours as inline `style` (Card sets
+ * `border: 1px solid var(--line)` inline), and an inline value outranks any
+ * stylesheet rule — without this the card would rise on hover but its border
+ * would never come forward. Transform and shadow need no such help.
+ */
+@media (hover: hover) and (pointer: fine) {
+  .lift:hover {
+    transform: translateY(-1px);
+    box-shadow: var(--shadow-lift);
+    border-color: var(--line-hover) !important;
+  }
+
+  .lift-row:hover {
+    background-color: var(--lift-bg) !important;
+    border-color: var(--lift-line) !important;
+  }
+}
+
+/* A press puts it back down: the surface follows the finger, not the theme. */
+.lift:active {
+  transform: translateY(0);
+  box-shadow: var(--shadow-rest);
+}
+
+.lift:focus-visible,
+.lift-row:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-pop);
+  border-color: var(--accent);
+}
+
+/*
+ * Copy-a-number affordance (components/CopyPhone.tsx). On touch there is no
+ * hover to reveal anything with, so the control is simply always there. A
+ * mouse gets a quieter resting state that comes up to full on hover — but
+ * never on focus-loss, and never to invisible: keyboard users must be able to
+ * see where they are, and a control nobody can see is a control nobody uses.
+ */
+.copy-affordance {
+  opacity: 1;
+  transition:
+    opacity 0.12s ease,
+    color 0.12s ease;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .copy-affordance {
+    opacity: 0.5;
+  }
+
+  .copy-host:hover .copy-affordance,
+  .copy-affordance:hover,
+  .copy-affordance:focus,
+  .copy-affordance:focus-visible,
+  .copy-affordance[data-state='copied'],
+  .copy-affordance[data-state='failed'] {
+    opacity: 1;
+  }
+}
+
+.copy-affordance:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-pop);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

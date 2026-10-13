@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" fill="currentColor" fill-rule="evenodd">
+  <!-- Talkr mark: the speech bubble with three voice bars. The bars are holes,
+       so the mark works on any background; colour it with `color`. -->
+  <path d="M29 5h42a24 24 0 0 1 24 24v37a24 24 0 0 1-24 24H30L5 100V29A24 24 0 0 1 29 5Z
+           M50 22a6 6 0 0 0-6 6v44a6 6 0 0 0 12 0V28a6 6 0 0 0-6-6Z
+           M33 36a6 6 0 0 0-6 6v16a6 6 0 0 0 12 0V42a6 6 0 0 0-6-6Z
+           M67 36a6 6 0 0 0-6 6v16a6 6 0 0 0 12 0V42a6 6 0 0 0-6-6Z"/>
+</svg>

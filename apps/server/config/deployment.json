@@ -1,0 +1,7 @@
+{
+  "PUBLIC_BASE_URL": "https://api.talkr.example.com",
+  "WEB_ORIGIN": "https://talkr.example.com,https://app.talkr.example.com",
+  "VOICE_PROVIDER": "none",
+  "RECORDINGS_DIR": "/tmp/recordings",
+  "LOG_LEVEL": "info"
+}

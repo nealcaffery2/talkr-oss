@@ -1,0 +1,24 @@
+node_modules/
+.env
+.env.local
+.env.*.local
+*.log
+.DS_Store
+.vercel
+.next/
+dist/
+build/
+*.wav
+*.mp3
+recordings/
+.vscode/
+.idea/
+loot/
+workspaces/
+playbook/raw/.private/
+playbook/parsed/
+# Talkr Platform
+apps/server/data/
+data/
+*.tsbuildinfo
+dist-serverless/

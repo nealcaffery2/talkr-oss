@@ -1,0 +1,26 @@
+# Example Fly.io config for the API server (docs/deploy.md). One machine runs
+# the API with the worker inline; scale to two process groups for production.
+# Set `app` to your own Fly app name and `primary_region` to the region nearest
+# your users and database before `fly deploy`.
+app = "your-talkr-api"
+primary_region = "your-region"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "4000"
+  WORKER_INLINE = "true"
+
+[http_service]
+  internal_port = 4000
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+[checks.health]
+  type = "http"
+  path = "/health"
+  interval = "30s"
+  timeout = "5s"

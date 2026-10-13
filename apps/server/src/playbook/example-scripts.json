@@ -1,0 +1,135 @@
+[
+  {
+    "kind": "script",
+    "title": "Opener",
+    "category": "opener",
+    "tags": [],
+    "contact_types": [],
+    "sort_order": 10,
+    "enabled": true,
+    "body": "## Opener\n\n**“Hi {first_name}, this is {rep_first_name} with {company}. I’m calling about {address}. Do you have a minute?”**\n\n> Example script. Replace it with your own team’s opener."
+  },
+  {
+    "kind": "script",
+    "title": "Rapport",
+    "category": "rapport",
+    "tags": [],
+    "contact_types": [],
+    "sort_order": 20,
+    "enabled": true,
+    "body": "## Rapport\n\nAsk one open question about them before you ask about the property.\n\n**“How long have you been at {address}?”**"
+  },
+  {
+    "kind": "script",
+    "title": "Qualifying",
+    "category": "qualifying",
+    "tags": [],
+    "contact_types": [],
+    "sort_order": 30,
+    "enabled": true,
+    "body": "## Qualifying\n\n- Are you the owner, or is anyone else on the title?\n- Is anyone living there right now?"
+  },
+  {
+    "kind": "script",
+    "title": "Motivation",
+    "category": "motivation",
+    "tags": [],
+    "contact_types": [],
+    "sort_order": 40,
+    "enabled": true,
+    "body": "## Motivation\n\n**“What has you thinking about selling?”**\n\nLet them talk. Follow up on what they say."
+  },
+  {
+    "kind": "script",
+    "title": "Condition",
+    "category": "condition",
+    "tags": [],
+    "contact_types": [],
+    "sort_order": 50,
+    "enabled": true,
+    "body": "## Condition\n\n- How old is the roof?\n- Any work the house needs that you know about?"
+  },
+  {
+    "kind": "script",
+    "title": "Timeline",
+    "category": "timeline",
+    "tags": [],
+    "contact_types": [],
+    "sort_order": 60,
+    "enabled": true,
+    "body": "## Timeline\n\n**“If everything lined up, when would you want to be done?”**"
+  },
+  {
+    "kind": "script",
+    "title": "Price",
+    "category": "price",
+    "tags": [],
+    "contact_types": [],
+    "sort_order": 70,
+    "enabled": true,
+    "body": "## Price\n\n**“Do you have a number in mind for the property?”**"
+  },
+  {
+    "kind": "script",
+    "title": "Close",
+    "category": "close",
+    "tags": [],
+    "contact_types": [],
+    "sort_order": 80,
+    "enabled": true,
+    "body": "## Close\n\nSummarize what you heard, state the next step, and set a time for it.\n\n**“Can we pick a time tomorrow to go over the numbers?”**"
+  },
+  {
+    "kind": "script",
+    "title": "Voicemail",
+    "category": "voicemail",
+    "tags": [],
+    "contact_types": [],
+    "sort_order": 90,
+    "enabled": true,
+    "body": "## Voicemail\n\n“Hi {first_name}, this is {rep_first_name} with {company} about {address}. Call me back at {phone}. Thanks.”"
+  },
+  {
+    "kind": "rebuttal",
+    "title": "Not interested",
+    "category": "objection",
+    "tags": [
+      "not interested",
+      "no thanks",
+      "not selling"
+    ],
+    "contact_types": [],
+    "sort_order": 100,
+    "enabled": true,
+    "body": "**“Understood. Is that true for any price, or just not right now?”**"
+  },
+  {
+    "kind": "rebuttal",
+    "title": "Call me back later",
+    "category": "objection",
+    "tags": [
+      "call back later",
+      "call me back",
+      "later"
+    ],
+    "contact_types": [],
+    "sort_order": 110,
+    "enabled": true,
+    "body": "**“Sure. What day and time works best for you?”**"
+  },
+  {
+    "kind": "rebuttal",
+    "title": "Need to talk to my spouse",
+    "category": "objection",
+    "tags": [
+      "spouse",
+      "wife",
+      "husband",
+      "family"
+    ],
+    "contact_types": [],
+    "sort_order": 120,
+    "enabled": true,
+    "body": "**“That makes sense. When could the three of us talk together?”**"
+  }
+]

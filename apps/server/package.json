@@ -1,0 +1,32 @@
+{
+  "name": "@talkr/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Talkr Platform backend: Fastify API + webhook ingestion + TwiML + workers.",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "start": "tsx src/server.ts",
+    "worker": "tsx src/worker-main.ts",
+    "seed": "tsx src/seed.ts",
+    "seed:demo": "tsx src/seed-demo.ts",
+    "bundle:serverless": "node scripts/bundle-serverless.mjs"
+  },
+  "dependencies": {
+    "@fastify/cors": "^11.3.0",
+    "@fastify/formbody": "^8.0.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@talkr/core": "*",
+    "@talkr/db": "*",
+    "@talkr/provider-telnyx": "*",
+    "fastify": "^5.0.0",
+    "jose": "^6.0.0",
+    "pino": "^9.5.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.11.0",
+    "pg": "^8.13.0",
+    "esbuild": "^0.25.0"
+  }
+}

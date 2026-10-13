@@ -1,0 +1,32 @@
+{
+  "name": "talkr-monorepo",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Talkr: sales calling + SMS platform (apps/server, packages/*) and Talkr Coach (apps/api, standalone).",
+  "type": "module",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "workspaces": [
+    "packages/core",
+    "packages/db",
+    "packages/provider-telnyx",
+    "apps/server",
+    "apps/web"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit -p packages/core && tsc --noEmit -p packages/db && tsc --noEmit -p packages/provider-telnyx && tsc --noEmit -p apps/server",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "db:generate": "drizzle-kit generate --config packages/db/drizzle.config.ts",
+    "server:dev": "npm run dev -w apps/server",
+    "worker:dev": "npm run worker -w apps/server"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "drizzle-kit": "^0.31.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "name": "@talkr/db",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Talkr Platform database: Drizzle schema, SQL migrations, client, Postgres-backed job queue.",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@talkr/core": "*",
+    "drizzle-orm": "^0.44.0",
+    "pg": "^8.13.0"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.11.0"
+  }
+}
