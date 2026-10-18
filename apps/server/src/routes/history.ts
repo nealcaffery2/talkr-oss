@@ -18,6 +18,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { Permission } from '@talkr/core';
 import type { Db } from '@talkr/db';
+import { callOwnedBySql } from '../services/call-owner.js';
 import type { AppDeps } from '../app.js';
 import { hasPermission, type AuthContext } from '../auth.js';
 import { localDayString, orgTimezone } from '../services/reports.js';
@@ -284,13 +285,14 @@ function callsWhere(f: HistoryFilters, scope: HistoryScope): SQL {
     sql`${CALL_AT} >= ${f.range.start}`,
     sql`${CALL_AT} < ${f.range.end}`,
   ];
-  // Own scope is attribution, the same rule GET /v1/calls applies.
-  if (!scope.orgCalls) parts.push(sql`c.user_id = ${scope.userId}`);
+  // Own scope: calls the rep handled, plus the unanswered ones (missed,
+  // voicemail) on their line. Same rule as GET /v1/calls (services/call-owner).
+  if (!scope.orgCalls) parts.push(callOwnedBySql(scope.userId));
   // Enum columns compare as text: an unknown value is an empty result, not a
   // Postgres "invalid input value for enum" error.
   if (f.direction) parts.push(sql`c.direction::text = ${f.direction}`);
   if (f.status) parts.push(sql`c.status::text = ${f.status}`);
-  if (f.userId) parts.push(sql`c.user_id = ${f.userId}`);
+  if (f.userId) parts.push(callOwnedBySql(f.userId));
   if (f.disposition) parts.push(sql`d.slug = ${f.disposition}`);
   if (f.minDuration != null) parts.push(sql`${CALL_DURATION} >= ${f.minDuration}`);
   if (f.maxDuration != null) parts.push(sql`${CALL_DURATION} <= ${f.maxDuration}`);

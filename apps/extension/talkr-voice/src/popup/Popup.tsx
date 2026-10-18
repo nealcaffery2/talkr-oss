@@ -8,7 +8,7 @@
  * document's snapshot; closing it never touches the call.
  */
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Icon, HangupIcon, type IconName } from '@/shared/Icon';
 import { Avatar, Button, Chip, ControlTile, Eyebrow, StatusMarker } from '@/shared/ui';
 import { AudioSheet } from '@/shared/AudioSheet';
@@ -19,6 +19,9 @@ import { TEMP_LABEL, TemperatureBadge, TempDot, oneLineAddress } from '@/shared/
 import { Account, SignIn } from './Account';
 import { CallerIdSheet, InboxList, RecentsList, VoicemailList, callerIdLabel, isMissed } from './Lists';
 import { CLOZR_BRIDGE } from '@/shared/clozr';
+import { ownCalls } from '@/shared/owner';
+import { PRESENCE_OPTIONS, setPresence } from '@/shared/presence';
+import { fromLineOptions, lineLabel, replyLine, threadLineId } from '@/shared/lines';
 import {
   api,
   type ActivityEventDto,
@@ -94,8 +97,43 @@ const HEADER_BTN: React.CSSProperties = {
   color: 'var(--muted)',
 };
 
+/**
+ * Who sent an outbound run and from which line ("You · (512) 555-0101"), over
+ * its first bubble. A teammate can text from a shared thread, so "outbound"
+ * alone does not say it was you. Repeated only when the sender or line changes.
+ */
+function senderLine(m: MessageDto, prev: MessageDto | undefined, me: MeDto | null, team: TeamMemberDto[]): string | null {
+  if (m.from_number === undefined && m.created_by === undefined) return null; // an older server
+  const same =
+    prev &&
+    prev.direction === 'outbound' &&
+    prev.created_by === m.created_by &&
+    prev.from_number === m.from_number &&
+    prev.is_auto_reply === m.is_auto_reply;
+  if (same) return null;
+  const who = m.is_auto_reply
+    ? 'Auto-reply'
+    : !m.created_by
+      ? null
+      : m.created_by === me?.id
+        ? 'You'
+        : (team.find((t) => t.id === m.created_by)?.display_name ?? 'A teammate');
+  const line = m.from_number ? formatPhone(m.from_number) : null;
+  const text = [who, line].filter(Boolean).join(' · ');
+  return text || null;
+}
+
+/** How long "Sending…" may sit before it is called what it is: unconfirmed. */
+const UNCONFIRMED_AFTER_MS = 10 * 60_000;
+
 /** "Delivered 9:44 AM" under the last bubble of a run, the way the design stamps it. */
 function deliveryStamp(m: MessageDto, now: number): string {
+  if ((m.status === 'queued' || m.status === 'sending') && now - Date.parse(m.created_at) > UNCONFIRMED_AFTER_MS) {
+    return `Not confirmed ${stamp(m.created_at, now)}`;
+  }
+  if (m.status === 'failed' || m.status === 'undelivered') {
+    return `Not delivered${m.error_code ? ` (${m.error_code})` : ''} ${stamp(m.created_at, now)}`;
+  }
   const label = m.status.charAt(0).toUpperCase() + m.status.slice(1);
   return `${label} ${stamp(m.delivered_at ?? m.sent_at ?? m.created_at, now)}`;
 }
@@ -245,9 +283,27 @@ function ContextStrip({
   );
 }
 
+/** The toolbar badge: the rep's threads with something unread. */
+function syncBadge(threads: ConversationDto[]): void {
+  const count = threads.filter((c) => c.unread_count > 0).length;
+  chrome.runtime.sendMessage({ type: 'talkr.badge', count }).catch(() => undefined);
+}
+
 export function Popup() {
   const { snapshot, dispatch } = useCall();
   const [tab, setTab] = useState<Tab>('dial');
+  // A clicked notification names the tab to land on (service worker, openPopupOn).
+  useEffect(() => {
+    void chrome.storage.local
+      .get('talkr_pending_view')
+      .then((stored) => {
+        const view = stored.talkr_pending_view as Tab | undefined;
+        if (!view) return;
+        void chrome.storage.local.remove('talkr_pending_view');
+        if (view === 'inbox' || view === 'voicemail' || view === 'dial') setTab(view);
+      })
+      .catch(() => undefined);
+  }, []);
   // Where the lead screen goes back to, and the number it was opened for.
   const [backTo, setBackTo] = useState<Tab>('dial');
   const [leadNumber, setLeadNumber] = useState<string | null>(null);
@@ -264,6 +320,8 @@ export function Popup() {
   const [screen, setScreen] = useState<'main' | 'account'>('main');
   const [me, setMe] = useState<MeDto | null>(null);
   const [micDenied, setMicDenied] = useState(false);
+  const [presenceOpen, setPresenceOpen] = useState(false);
+  const presenceNow = PRESENCE_OPTIONS.find((o) => o.value === snapshot.presence) ?? PRESENCE_OPTIONS[0]!;
   // Who is on the other end of the number in play: the contact, their lead,
   // and what has happened with them. Looked up by number, so it works the
   // same for a typed number, a thread, an incoming call and a live one.
@@ -324,14 +382,26 @@ export function Popup() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [signedInAs]);
 
-  // Inbox, Recents and Voicemail: on sign-in, and again once a call is over.
+  // Inbox, Recents and Voicemail: the rep's own only (shared/owner.ts), read
+  // on sign-in, once a call is over, and whenever the live stream says a text,
+  // call or voicemail moved (`inboxTick`, bumped by the offscreen document).
   const callOver = snapshot.phase === 'idle' || snapshot.phase === 'wrapup';
+  const refreshLists = useCallback(() => {
+    if (!me) return;
+    api
+      .listMyConversations(me)
+      .then((threads) => {
+        setConversations(threads);
+        syncBadge(threads);
+      })
+      .catch(() => undefined);
+    api.callHistory(me.id).then((r) => setCalls(ownCalls(r.items, me))).catch(() => undefined);
+  }, [me]);
   useEffect(() => {
     if (!sessionState || !callOver) return;
-    api.listConversations().then((r) => setConversations(r.conversations)).catch(() => undefined);
-    if (signedInAs) api.callHistory(signedInAs).then((r) => setCalls(r.items)).catch(() => undefined);
+    refreshLists();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [signedInAs, callOver]);
+  }, [refreshLists, callOver, snapshot.inboxTick]);
 
   function go(next: Tab) {
     setTab(next);
@@ -367,11 +437,16 @@ export function Popup() {
       .then((r) => alive && setMessages(r.messages))
       .catch(() => alive && setMessages([]));
     void api.markConversationRead(threadId).catch(() => undefined);
-    setConversations((cs) => cs.map((c) => (c.id === threadId ? { ...c, unread_count: 0 } : c)));
+    setConversations((cs) => {
+      const next = cs.map((c) => (c.id === threadId ? { ...c, unread_count: 0 } : c));
+      syncBadge(next);
+      return next;
+    });
     return () => {
       alive = false;
     };
-  }, [threadId]);
+    // inboxTick: a reply that lands while the thread is open shows up in it.
+  }, [threadId, snapshot.inboxTick]);
 
   // A ringing or live call pulls the popup to the Dial tab: that is what the
   // rep opened it for. An incoming call too, or Accept is on a tab they are not on.
@@ -382,6 +457,18 @@ export function Popup() {
   }, [snapshot.phase, ringingIn]);
 
   const thread = conversations.find((c) => c.id === threadId) ?? null;
+
+  // The line a text goes out on follows the thread: whichever line already
+  // carries it, or the rep's default on a new one (shared/lines.ts). A manual
+  // pick stands until they open a different thread.
+  const [fromId, setFromId] = useState('');
+  const threadLineKey = `${thread?.phone_number_id ?? ''}|${thread?.our_number ?? ''}`;
+  useEffect(() => {
+    if (!me) return;
+    setFromId(replyLine(me, thread) ?? '');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [me, threadId, composeTo, threadLineKey]);
+  const fromOptions = me ? fromLineOptions(me, thread ? threadLineId(thread, me) : null, fromId || null) : [];
   const threadNumber = thread?.their_number ?? composeTo ?? '';
   const unreadCount = conversations.reduce((s, c) => s + c.unread_count, 0);
   // ponytail: "missed today" stands in for "missed since you last looked"; add a seen marker if reps ask.
@@ -498,14 +585,18 @@ export function Popup() {
     setSmsError(null);
     try {
       const result = await api.sendMessage(
-        threadId ? { conversation_id: threadId, body: draft } : { to_number: composeTo ?? toE164(digits), body: draft },
+        {
+          ...(threadId ? { conversation_id: threadId } : { to_number: composeTo ?? toE164(digits) }),
+          body: draft,
+          ...(fromId ? { from_phone_number_id: fromId } : {}),
+        },
       );
       setDraft('');
       setComposeTo(null);
       setThreadId(result.conversation_id);
       const r = await api.listConversationMessages(result.conversation_id);
       setMessages(r.messages);
-      api.listConversations().then((c) => setConversations(c.conversations)).catch(() => undefined);
+      refreshLists();
     } catch (err) {
       setSmsError((err as Error).message);
     }
@@ -540,20 +631,86 @@ export function Popup() {
         }}
       >
         <img src="icons/48.png" alt="" width={26} height={26} />
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 2, marginRight: 'auto' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 2, marginRight: 'auto', position: 'relative' }}>
           <div style={{ font: '700 13px/1 Inter' }}>Talkr</div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 5, font: '500 11px/1 Inter', color: 'var(--muted)' }}>
+          <button
+            type="button"
+            onClick={() => setPresenceOpen((v) => !v)}
+            aria-haspopup="menu"
+            aria-expanded={presenceOpen}
+            title="Set your status"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 5,
+              padding: 0,
+              border: 'none',
+              background: 'transparent',
+              font: '500 11px/1 Inter',
+              color: 'var(--muted)',
+              textAlign: 'left',
+            }}
+          >
             <span
               style={{
                 width: 6,
                 height: 6,
-                background: snapshot.device === 'ready' ? 'var(--green)' : 'var(--amber)',
+                background: snapshot.device === 'ready' ? presenceNow.color : 'var(--amber)',
               }}
               aria-hidden
             />
-            {DEVICE_STATUS[snapshot.device]} · {tzTime(localZone(), now)}{' '}
+            {snapshot.device === 'ready' ? presenceNow.label : DEVICE_STATUS[snapshot.device]} · {tzTime(localZone(), now)}{' '}
             {tzAbbr(localZone(), now)}
-          </div>
+            <Icon name="chevron-down" size={11} />
+          </button>
+          {presenceOpen && (
+            <div
+              role="menu"
+              style={{
+                position: 'absolute',
+                top: 'calc(100% + 6px)',
+                left: 0,
+                zIndex: 20,
+                width: 250,
+                padding: 4,
+                borderRadius: 10,
+                border: '1px solid var(--line)',
+                background: 'var(--panel)',
+                boxShadow: '0 8px 24px rgba(0,0,0,.14)',
+              }}
+            >
+              {PRESENCE_OPTIONS.map((o) => (
+                <button
+                  key={o.value}
+                  type="button"
+                  role="menuitemradio"
+                  aria-checked={snapshot.presence === o.value}
+                  onClick={() => {
+                    setPresenceOpen(false);
+                    void setPresence(o.value);
+                  }}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'flex-start',
+                    gap: 8,
+                    width: '100%',
+                    padding: '7px 8px',
+                    border: 'none',
+                    borderRadius: 7,
+                    background: snapshot.presence === o.value ? 'var(--panel-2)' : 'transparent',
+                    color: 'inherit',
+                    textAlign: 'left',
+                  }}
+                >
+                  <span style={{ width: 7, height: 7, marginTop: 3, borderRadius: '50%', background: o.color, flexShrink: 0 }} aria-hidden />
+                  <span style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+                    <span style={{ font: '600 12px/1 Inter' }}>{o.label}</span>
+                    <span style={{ font: '400 10.5px/1.3 Inter', color: 'var(--muted)' }}>{o.hint}</span>
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
         </div>
         <button
           type="button"
@@ -590,6 +747,7 @@ export function Popup() {
             conversations={conversations}
             calls={calls}
             now={now}
+            me={me}
             onOpenThread={(id) => setThreadId(id)}
             onOpenLead={openLead}
             onCall={callNumber}
@@ -1520,6 +1678,7 @@ export function Popup() {
                     const mine = m.direction === 'outbound';
                     const next = messages[i + 1];
                     const tail = !next || next.direction !== m.direction;
+                    const sender = mine ? senderLine(m, messages[i - 1], me, team) : null;
                     return (
                       <div
                         key={m.id}
@@ -1533,6 +1692,9 @@ export function Popup() {
                           gap: 3,
                         }}
                       >
+                        {sender && (
+                          <span style={{ font: '500 10px/1.2 Inter', color: 'var(--muted)', marginTop: 4 }}>{sender}</span>
+                        )}
                         <div
                           style={{
                             position: 'relative',
@@ -1651,6 +1813,44 @@ export function Popup() {
                       </button>
                     ))}
                   </div>
+                )}
+
+                {fromOptions.length > 0 && (
+                  <label
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 6,
+                      padding: '6px 12px',
+                      borderTop: '1px solid var(--line-soft)',
+                      font: '500 11px/1 Inter',
+                      color: 'var(--muted)',
+                    }}
+                  >
+                    From
+                    <select
+                      value={fromId}
+                      onChange={(e) => setFromId(e.target.value)}
+                      disabled={fromOptions.length < 2}
+                      aria-label="Send from"
+                      style={{
+                        flex: 1,
+                        minWidth: 0,
+                        height: 24,
+                        border: '1px solid var(--line)',
+                        borderRadius: 7,
+                        background: 'var(--panel)',
+                        color: 'var(--text)',
+                        font: '500 11.5px/1 Inter',
+                      }}
+                    >
+                      {fromOptions.map((n) => (
+                        <option key={n.id} value={n.id}>
+                          {lineLabel(n, formatPhone)}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
                 )}
 
                 {smsError && (

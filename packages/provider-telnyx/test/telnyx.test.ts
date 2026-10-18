@@ -12,6 +12,7 @@ import { generateKeyPairSync, sign } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
   TelnyxVoiceProvider,
+  flattenMessagingEvent,
   idempotencyKeyFor,
   normalizeTelnyxWebhook,
   publicKeyFromBase64,
@@ -434,5 +435,126 @@ describe('Telnyx REST', () => {
     expect(res.body).not.toContain('<Client');
     expect(res.body).toContain('sip:gencred-aaa@sip.telnyx.com');
     expect(res.body).toContain('sip:gencred-bbb@sip.telnyx.com');
+  });
+
+  describe('unsigned 2010-04-01 SMS webhooks', () => {
+    const SID = '4031a135-92a7-48b8-ac32-c3d11ec2a5d3';
+    function record(over: Record<string, unknown> = {}) {
+      return new Response(
+        JSON.stringify({
+          data: {
+            id: SID,
+            direction: 'inbound',
+            messaging_profile_id: 'profile-1',
+            text: 'carrier body',
+            from: { phone_number: '+15125550101' },
+            to: [{ phone_number: '+15125550102', status: 'webhook_delivered' }],
+            ...over,
+          },
+        }),
+        { status: 200 },
+      );
+    }
+    const posted = { MessageSid: SID, From: '+19999999999', To: '+15125550102', Body: 'forged body' };
+
+    it('confirms an inbound text from the carrier record and stores its numbers and body', async () => {
+      const { provider, calls } = providerWith(() => record());
+      const out = await provider.confirmMessageWebhook('inbound-sms', posted);
+      expect(calls[0]!.url).toBe(`https://api.telnyx.com/v2/messages/${SID}`);
+      expect(calls[0]!.auth).toBe('Bearer KEY');
+      expect(out).toMatchObject({ MessageSid: SID, From: '+15125550101', To: '+15125550102', Body: 'carrier body' });
+    });
+
+    it('confirms a status callback for an outbound message', async () => {
+      const { provider } = providerWith(() =>
+        record({ direction: 'outbound', from: { phone_number: '+15125550103' }, to: [{ phone_number: '+15125550104' }] }),
+      );
+      const out = await provider.confirmMessageWebhook('sms-status', { MessageSid: SID, MessageStatus: 'delivered' });
+      expect(out).toMatchObject({ MessageStatus: 'delivered', From: '+15125550103', To: '+15125550104' });
+      expect(out!.Body).toBeUndefined();
+    });
+
+    it('rejects a message the carrier does not have, or that is not ours', async () => {
+      expect(await providerWith(() => new Response('{}', { status: 404 })).provider.confirmMessageWebhook('inbound-sms', posted)).toBeNull();
+      expect(await providerWith(() => record({ messaging_profile_id: 'other' })).provider.confirmMessageWebhook('inbound-sms', posted)).toBeNull();
+      expect(await providerWith(() => record({ direction: 'outbound' })).provider.confirmMessageWebhook('inbound-sms', posted)).toBeNull();
+      expect(await providerWith(() => record({ id: 'someone-else' })).provider.confirmMessageWebhook('inbound-sms', posted)).toBeNull();
+      expect(await providerWith(() => { throw new Error('network'); }).provider.confirmMessageWebhook('inbound-sms', posted)).toBeNull();
+    });
+
+    it('never calls the carrier for a missing or malformed sid', async () => {
+      const { provider, calls } = providerWith(() => record());
+      expect(await provider.confirmMessageWebhook('inbound-sms', { ...posted, MessageSid: '' })).toBeNull();
+      expect(await provider.confirmMessageWebhook('inbound-sms', { ...posted, MessageSid: '../phone_numbers' })).toBeNull();
+      expect(calls).toHaveLength(0);
+    });
+  });
+});
+
+describe('flattenMessagingEvent (Messaging API v2 JSON)', () => {
+  const finalized = {
+    data: {
+      event_type: 'message.finalized',
+      occurred_at: '2026-10-14T19:12:45.407+00:00',
+      record_type: 'event',
+      payload: {
+        id: '4031a13b-d4ce-46ff-a9b3-b53c931223ac',
+        to: [{ status: 'delivered', phone_number: '+14045550100' }],
+        from: { phone_number: '+18305550100' },
+        parts: 1,
+        errors: [],
+        direction: 'outbound',
+      },
+    },
+  };
+
+  it('turns a delivery receipt into the TeXML-style status params', () => {
+    const p = flattenMessagingEvent('sms-status', finalized)!;
+    expect(p).toMatchObject({
+      MessageSid: '4031a13b-d4ce-46ff-a9b3-b53c931223ac',
+      MessageStatus: 'delivered',
+      From: '+18305550100',
+      To: '+14045550100',
+      NumSegments: '1',
+    });
+    const [event] = normalizeTelnyxWebhook('sms-status', p);
+    expect(event).toMatchObject({ type: 'message.status', providerObjectId: '4031a13b-d4ce-46ff-a9b3-b53c931223ac' });
+    expect((event as { data: { status: string } }).data.status).toBe('delivered');
+  });
+
+  it('maps sending_failed and carries the error code', () => {
+    const body = structuredClone(finalized);
+    body.data.payload.to[0]!.status = 'sending_failed';
+    (body.data.payload as { errors: unknown[] }).errors = [{ code: '40008', title: 'Unreachable' }];
+    const p = flattenMessagingEvent('sms-status', body)!;
+    expect(p.ErrorCode).toBe('40008');
+    const [event] = normalizeTelnyxWebhook('sms-status', p);
+    expect((event as { data: { status: string } }).data.status).toBe('failed');
+  });
+
+  it('turns message.received into inbound params with media', () => {
+    const p = flattenMessagingEvent('inbound-sms', {
+      data: {
+        event_type: 'message.received',
+        record_type: 'event',
+        payload: {
+          id: 'in-1',
+          from: { phone_number: '+14045550101' },
+          to: [{ phone_number: '+18305550100', status: 'webhook_delivered' }],
+          text: 'Call me after 3',
+          media: [{ url: 'https://media.example/a.jpg', content_type: 'image/jpeg' }],
+          parts: 1,
+        },
+      },
+    })!;
+    expect(p).toMatchObject({ MessageSid: 'in-1', From: '+14045550101', To: '+18305550100', Body: 'Call me after 3', NumMedia: '1', MediaUrl0: 'https://media.example/a.jpg' });
+    const [event] = normalizeTelnyxWebhook('inbound-sms', p);
+    expect(event).toMatchObject({ type: 'message.received', providerObjectId: 'in-1' });
+  });
+
+  it('leaves form params and other endpoints alone', () => {
+    expect(flattenMessagingEvent('sms-status', { MessageSid: 'x', MessageStatus: 'sent' })).toBeNull();
+    expect(flattenMessagingEvent('voice-status', finalized)).toBeNull();
+    expect(flattenMessagingEvent('sms-status', null)).toBeNull();
   });
 });

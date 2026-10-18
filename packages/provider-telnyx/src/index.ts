@@ -43,7 +43,7 @@ import type {
   VoiceProvider,
   WebhookRequest,
 } from '@talkr/core';
-import { idempotencyKeyFor, normalizeTelnyxWebhook, type TelnyxEndpoint } from './normalize.js';
+import { flattenMessagingEvent, idempotencyKeyFor, normalizeTelnyxWebhook, type TelnyxEndpoint } from './normalize.js';
 import {
   publicKeyFromBase64,
   verifyTelnyxSignature,
@@ -52,7 +52,7 @@ import {
 } from './signature.js';
 import { CONTENT_TYPE, el, eventList, texml } from './texml.js';
 
-export { idempotencyKeyFor, normalizeTelnyxWebhook } from './normalize.js';
+export { flattenMessagingEvent, idempotencyKeyFor, normalizeTelnyxWebhook } from './normalize.js';
 export type { TelnyxEndpoint } from './normalize.js';
 export {
   publicKeyFromBase64,
@@ -199,6 +199,7 @@ export class TelnyxVoiceProvider implements VoiceProvider, MessagingProvider, Nu
     credentials: () => `${API_BASE}/telephony_credentials`,
     credentialToken: (id: string) => `${API_BASE}/telephony_credentials/${id}/token`,
     messages: () => `${API_BASE}/messages`,
+    message: (id: string) => `${API_BASE}/messages/${encodeURIComponent(id)}`,
     /** Number inventory (v2). Search, order, then the owned-number resource. */
     availableNumbers: (query: string) => `${API_BASE}/available_phone_numbers?${query}`,
     numberOrders: () => `${API_BASE}/number_orders`,
@@ -284,6 +285,10 @@ export class TelnyxVoiceProvider implements VoiceProvider, MessagingProvider, Nu
 
   normalizeWebhook(endpoint: string, params: Record<string, string>): CanonicalEvent[] {
     return normalizeTelnyxWebhook(endpoint as TelnyxEndpoint, params);
+  }
+
+  flattenMessageWebhook(endpoint: string, body: unknown): Record<string, string> | null {
+    return flattenMessagingEvent(endpoint, body);
   }
 
   // ── Browser credentials ───────────────────────────────────────────────────
@@ -1156,6 +1161,47 @@ export class TelnyxVoiceProvider implements VoiceProvider, MessagingProvider, Nu
       },
     });
     return { providerMessageId: sent.data.id };
+  }
+
+  /**
+   * The messaging profile posts 2010-04-01 webhooks, which Telnyx does not
+   * sign. The request is not trusted: the message it names is read back with
+   * our API key and must exist, belong to our messaging profile, and run in
+   * the direction the endpoint implies. The numbers and body that get stored
+   * come from that record, so a forged request can at most replay a real one.
+   */
+  async confirmMessageWebhook(
+    endpoint: 'inbound-sms' | 'sms-status',
+    params: Record<string, string>,
+  ): Promise<Record<string, string> | null> {
+    const sid = params.MessageSid;
+    if (!sid || !/^[0-9a-f-]{36}$/i.test(sid)) return null;
+    let msg: {
+      id?: string;
+      direction?: string;
+      messaging_profile_id?: string;
+      text?: string;
+      from?: { phone_number?: string };
+      to?: Array<{ phone_number?: string }>;
+    };
+    try {
+      const { status, text } = await this.request(this.paths.message(sid), { method: 'GET' });
+      if (status !== 200) return null;
+      msg = (JSON.parse(text) as { data?: typeof msg }).data ?? {};
+    } catch {
+      return null;
+    }
+    if (msg.id !== sid) return null;
+    if (msg.direction !== (endpoint === 'inbound-sms' ? 'inbound' : 'outbound')) return null;
+    if (this.config.messagingProfileId && msg.messaging_profile_id !== this.config.messagingProfileId) {
+      return null;
+    }
+    const from = msg.from?.phone_number;
+    const to = msg.to?.[0]?.phone_number;
+    if (!from || !to) return null;
+    const confirmed: Record<string, string> = { ...params, From: from, To: to };
+    if (endpoint === 'inbound-sms') confirmed.Body = msg.text ?? '';
+    return confirmed;
   }
 }
 

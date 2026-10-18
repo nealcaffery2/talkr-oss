@@ -298,7 +298,7 @@ export async function sendMessage(dbh: DbHandle, ctx: AuthContext, input: SendMe
       },
     });
 
-    return { message, conversationId: convo.id };
+    return { message, conversationId: convo.id, ourNumber: convo.ourNumber, theirNumber: convo.theirNumber };
   });
 
   await publishBusEvent(dbh.pool, {
@@ -1292,7 +1292,14 @@ export async function getConversationForUser(
   return row;
 }
 
-export function serializeMessage(m: MessageRow) {
+/**
+ * A message on the wire. The numbers belong to the thread (one thread per
+ * our_number × their_number), so they are copied onto each message when the
+ * caller has the conversation: a CRM filing the text by who sent it needs the
+ * line it left from, and the conversation list alone does not say.
+ */
+export function serializeMessage(m: MessageRow, conv?: { ourNumber: string; theirNumber: string } | null) {
+  const outbound = m.direction === 'outbound';
   return {
     id: m.id,
     conversation_id: m.conversationId,
@@ -1300,6 +1307,8 @@ export function serializeMessage(m: MessageRow) {
     status: m.status,
     body: m.body,
     media_urls: m.mediaUrls,
+    from_number: conv ? (outbound ? conv.ourNumber : conv.theirNumber) : null,
+    to_number: conv ? (outbound ? conv.theirNumber : conv.ourNumber) : null,
     num_segments: m.numSegments,
     provider_message_sid: m.providerMessageSid,
     error_code: m.errorCode,

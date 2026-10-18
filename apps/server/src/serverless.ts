@@ -33,6 +33,7 @@ import { provisionBrowserCredentials } from './services/provision.js';
 import { applyRuntimeSettings, runtimeSettingsVersion } from './services/runtime-settings.js';
 import { bootstrapTelnyxIfNeeded } from './services/telnyx-bootstrap.js';
 import { JobRunner } from './worker/runner.js';
+import { setJobKicker } from './services/job-kick.js';
 import { HANDLERS } from './worker/handlers.js';
 import { seedWebhookFanout } from './worker/webhook-fanout.js';
 import { tickAuthorized } from './tick-auth.js';
@@ -137,6 +138,9 @@ async function bootOnce(): Promise<Booted> {
       HANDLERS,
       { backoffBaseMs: config.JOB_BACKOFF_BASE_MS },
     );
+
+    // A text runs the moment it is queued (services/job-kick.ts), not on the next tick.
+    setJobKicker((dedupeKey) => runner.runOnce({ dedupeKey }));
 
     // The worker, one minute at a time. Sweeps are deduplicated by the queue,
     // so seeding them on every tick costs nothing when they already exist.

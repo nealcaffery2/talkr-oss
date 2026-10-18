@@ -60,18 +60,36 @@ export async function receiveTwilioWebhook(
   opts: { enqueueProcessing: boolean; jobType?: string },
 ): Promise<HandledWebhook> {
   const { config, dbh, provider } = deps;
-  const params = (req.body ?? {}) as Record<string, string>;
+  // Telnyx Messaging API v2 posts JSON events; the rest of the pipeline reads
+  // the flat TeXML-style params, so a message event is flattened first. The
+  // signature still covers the raw bytes (rawBodyString), not this view.
+  let params = (provider.flattenMessageWebhook?.(endpoint, req.body) ?? req.body ?? {}) as Record<string, string>;
   const query = (req.query ?? {}) as Record<string, string>;
   const url = `${config.PUBLIC_BASE_URL}${req.raw.url ?? ''}`;
   const rawBody = (req as FastifyRequest & { rawBodyString?: string }).rawBodyString ?? '';
 
-  const valid = provider.validateWebhook({
+  let valid = provider.validateWebhook({
     url,
     method: req.method,
     headers: req.headers,
     params,
     rawBody,
   });
+
+  // Telnyx posts 2010-04-01 SMS webhooks unsigned. Those are accepted only
+  // when the carrier confirms the message, and stored from its record.
+  if (
+    !valid &&
+    (endpoint === 'inbound-sms' || endpoint === 'sms-status') &&
+    !req.headers['telnyx-signature-ed25519'] &&
+    provider.confirmMessageWebhook
+  ) {
+    const confirmed = await provider.confirmMessageWebhook(endpoint, params);
+    if (confirmed) {
+      params = confirmed;
+      valid = true;
+    }
+  }
 
   const merged = { ...params, ...query };
   const idempotencyKey = valid

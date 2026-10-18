@@ -6,6 +6,7 @@
  */
 
 import { createNoncePair } from './nonce';
+import { ownThreads } from './owner';
 import { session as sessionStore, type Session, type SessionUser } from './session';
 
 export interface CallDto {
@@ -68,6 +69,10 @@ export interface ConversationDto {
   last_message_at: string | null;
   last_message: { direction: 'inbound' | 'outbound'; body: string; media_count: number } | null;
   unread_count: number;
+  /** The org line the thread is on, and who it is assigned to: whose thread it is (shared/owner.ts). */
+  phone_number_id?: string | null;
+  assigned_user_id?: string | null;
+  assigned_user_name?: string | null;
 }
 
 export interface MessageDto {
@@ -80,6 +85,13 @@ export interface MessageDto {
   created_at: string;
   sent_at: string | null;
   delivered_at: string | null;
+  /** The numbers it travelled between. Absent on servers before the from/to fields. */
+  from_number?: string | null;
+  to_number?: string | null;
+  /** The teammate who sent an outbound text; null for an inbound one or an automatic reply. */
+  created_by?: string | null;
+  is_auto_reply?: boolean;
+  error_code?: string | null;
 }
 
 export interface MessageTemplateDto {
@@ -636,6 +648,28 @@ export const api = {
 
   // SMS
   listConversations: () => request<{ conversations: ConversationDto[] }>('/v1/conversations'),
+  /**
+   * The rep's own threads. An owner or admin's plain list is the whole
+   * office's, newest 50; this reads the threads assigned to the rep and the
+   * threads on each of their lines, then keeps the ones that are theirs.
+   */
+  listMyConversations: async (me: MeDto): Promise<ConversationDto[]> => {
+    const lines = (me.org_numbers ?? []).filter((n) => n.assigned_user_id === me.id);
+    const paths = [
+      `/v1/conversations?user_id=${encodeURIComponent(me.id)}&limit=100`,
+      ...lines.map((n) => `/v1/conversations?number_id=${encodeURIComponent(n.id)}&limit=100`),
+    ];
+    const lists = await Promise.all(
+      paths.map((p) =>
+        request<{ conversations: ConversationDto[] }>(p)
+          .then((r) => r.conversations)
+          .catch((err: unknown) => err as Error),
+      ),
+    );
+    const ok = lists.filter((l): l is ConversationDto[] => Array.isArray(l));
+    if (!ok.length) throw lists[0] as Error;
+    return ownThreads(ok, me);
+  },
   listConversationMessages: (id: string) =>
     request<{ messages: MessageDto[] }>(`/v1/conversations/${id}/messages`),
   markConversationRead: (id: string) =>
@@ -645,6 +679,8 @@ export const api = {
     }),
   sendMessage: (input: {
     conversation_id?: string;
+    /** The line to send from; without it the server picks the thread's line or the rep's default. */
+    from_phone_number_id?: string;
     to_number?: string;
     body?: string;
     template_id?: string;

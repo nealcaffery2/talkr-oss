@@ -373,4 +373,21 @@ export interface MessagingProvider {
     mediaUrls?: string[];
     statusCallbackUrl?: string;
   }): Promise<{ providerMessageId: string }>;
+  /**
+   * Confirm an unsigned messaging webhook against the carrier's own record of
+   * the message it names. Telnyx sends 2010-04-01 (Twilio-format) SMS webhooks
+   * without a signature header. Returns the params to ingest, with the
+   * numbers and body taken from the carrier rather than the request, or null
+   * when the carrier has no matching message.
+   */
+  confirmMessageWebhook?(
+    endpoint: 'inbound-sms' | 'sms-status',
+    params: Record<string, string>,
+  ): Promise<Record<string, string> | null>;
+  /**
+   * A messaging webhook posted as JSON (Telnyx Messaging API v2) as the flat
+   * params the normalizer reads. Null when the body is already flat params or
+   * not a message event.
+   */
+  flattenMessageWebhook?(endpoint: string, body: unknown): Record<string, string> | null;
 }

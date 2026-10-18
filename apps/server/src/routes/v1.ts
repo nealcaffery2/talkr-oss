@@ -38,6 +38,7 @@ import { writeAudit } from '../services/audit.js';
 import { leadActivity } from '../services/lead-activity.js';
 import { seedDemo } from '../seed-demo.js';
 import { callRoutingOf } from '../services/last-contact.js';
+import { callOwnedBySql, ownsCall } from '../services/call-owner.js';
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -306,7 +307,7 @@ export function registerV1Routes(app: FastifyInstance, deps: AppDeps): void {
     const seeOrg = hasPermission(ctx, 'calls.read.org');
     const where = seeOrg
       ? eq(schema.calls.orgId, ctx.orgId)
-      : and(eq(schema.calls.orgId, ctx.orgId), eq(schema.calls.userId, ctx.userId));
+      : and(eq(schema.calls.orgId, ctx.orgId), callOwnedBySql(ctx.userId, 'calls'));
     const rows = await dbh.db
       .select()
       .from(schema.calls)
@@ -372,7 +373,7 @@ export function registerV1Routes(app: FastifyInstance, deps: AppDeps): void {
         .limit(1)
     )[0];
     if (!call) return reply.code(404).send({ error: 'not_found' });
-    if (!hasPermission(ctx, 'calls.read.org') && call.userId !== ctx.userId) {
+    if (!hasPermission(ctx, 'calls.read.org') && !(await ownsCall(dbh.db, call, ctx.userId))) {
       return reply.code(403).send({ error: 'forbidden' });
     }
     const [events, recs] = await Promise.all([
@@ -562,7 +563,7 @@ export function registerV1Routes(app: FastifyInstance, deps: AppDeps): void {
           .limit(1)
       )[0];
       if (!call) return reply.code(404).send({ error: 'not_found' });
-      if (!hasPermission(ctx, 'calls.read.org') && call.userId !== ctx.userId) {
+      if (!hasPermission(ctx, 'calls.read.org') && !(await ownsCall(dbh.db, call, ctx.userId))) {
         return reply.code(403).send({ error: 'forbidden' });
       }
       const rows = await dbh.db

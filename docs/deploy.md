@@ -108,6 +108,17 @@ password sign-in's is.
    (the repo ships without one), so it is the same for every rep and on every machine.
    **Changing or removing that `key` changes the id and breaks this URI.** (An unpacked
    extension without a `key` takes its id from the folder path.)
+
+   The web app's "Continue with Google" (on `/login`) redirects back to
+   `/login/google`, so add that path for every origin the web app is served from
+   to the same *Authorized redirect URIs* list:
+
+   ```
+   https://talkr.example.com/login/google
+   ```
+
+   Without them Google stops the web sign-in with `redirect_uri_mismatch`; the
+   extension is unaffected.
 2. Copy the **client ID** and **client secret**.
 3. **Supabase dashboard** (your project) → Authentication → Providers → **Google** →
    enable, paste both. In *Authorized Client IDs* on that same page, add the client ID

@@ -9,6 +9,8 @@
  *      redeem the same one. A session adopted from an open CLOZR tab is
  *      renewed by re-reading that tab rather than by a refresh token, because
  *      the tab's own Supabase client is the thing that renews it;
+ *      The rep's presence (Available, Do not disturb, Away) is kept here
+ *      for the same reason and handed to the document whenever it is made;
  *   3. dial requests from a page — click-to-call. A content script has no
  *      session and no carrier client, so it asks here, and here is also where
  *      the refusals with a next step come from (signed out, no microphone,
@@ -27,6 +29,8 @@ import {
 } from '@/shared/session';
 import { DIAL_REQUEST, isDialRequest, type DialRequest, type DialResult } from '@/shared/dial';
 import { envelope, type CallSnapshot, type Command } from '@/shared/messages';
+import type { LiveBadge, LiveNotice } from '@/offscreen/live';
+import { PRESENCE_KEY, SET_PRESENCE, asPresence, type Presence } from '@/shared/presence';
 import {
   CLOZR_APP_URL,
   CLOZR_BRIDGE,
@@ -42,6 +46,8 @@ const STORAGE = {
   session: 'talkr_session',
   apiUrl: 'talkr_api_url',
   clozrSync: 'talkr_clozr_sync',
+  /** The popup tab a clicked notification asked for; the popup reads and clears it. */
+  pendingView: 'talkr_pending_view',
 } as const;
 /** Refresh this close to expiry so a request in flight never uses a dead token. */
 const REFRESH_SKEW_SECONDS = 90;
@@ -65,9 +71,12 @@ async function hasOffscreen(): Promise<boolean> {
  */
 async function ensureOffscreen(): Promise<void> {
   if (ensuring) return ensuring;
+  let created = false;
   ensuring = (async () => {
     try {
       if (await hasOffscreen()) return;
+      // A fresh document starts Available; tell it what the rep picked once it answers.
+      created = true;
       await chrome.offscreen.createDocument({
         url: OFFSCREEN_PATH,
         // USER_MEDIA: getUserMedia for the mic on answer. AUDIO_PLAYBACK: the
@@ -84,9 +93,32 @@ async function ensureOffscreen(): Promise<void> {
       if (!String(err).includes('Only a single offscreen')) throw err;
     } finally {
       ensuring = null;
+      if (created) void pushPresence();
     }
   })();
   return ensuring;
+}
+
+// ── Presence ───────────────────────────────────────────────────────────────
+
+async function readPresence(): Promise<Presence> {
+  const stored = await chrome.storage.local.get([PRESENCE_KEY]);
+  return asPresence(stored[PRESENCE_KEY]);
+}
+
+/** Hand the document the rep's presence, once it is up to hear it. */
+async function pushPresence(): Promise<void> {
+  const presence = await readPresence();
+  if (!(await offscreenReady())) return;
+  await chrome.runtime
+    .sendMessage(envelope<Command>({ type: 'setPresence', presence }))
+    .catch(() => undefined);
+}
+
+async function savePresence(presence: Presence): Promise<void> {
+  await chrome.storage.local.set({ [PRESENCE_KEY]: presence });
+  if (await hasOffscreen()) await pushPresence();
+  else await ensureOffscreen();
 }
 
 // ── Session ────────────────────────────────────────────────────────────────
@@ -490,6 +522,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       .catch((err: Error) => sendResponse({ ok: false, error: err.message }));
     return true;
   }
+  if (type === SET_PRESENCE) {
+    void savePresence(asPresence((message as { presence?: unknown }).presence))
+      .then(() => sendResponse({ ok: true }))
+      .catch((err: Error) => sendResponse({ ok: false, error: err.message }));
+    return true;
+  }
   if (isSessionRequest(message)) {
     void handleSession(message)
       .then((value) => sendResponse({ ok: true, value }))
@@ -539,6 +577,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     });
     return true;
   }
+  if (type === 'talkr.notify') {
+    void showLiveNotice(message as LiveNotice);
+    return false;
+  }
+  if (type === 'talkr.badge') {
+    void setBadge(Number((message as LiveBadge).count) || 0);
+    return false;
+  }
   if (type === 'snapshot') {
     // The offscreen document broadcasts to everyone. The worker listens for
     // two things: whether CLOZR should stand its own softphone down while this
@@ -554,6 +600,108 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 let softphoneHolding = false;
 let lastCallPhase: CallSnapshot['phase'] = 'idle';
 
+// ── Notifications ──────────────────────────────────────────────────────────
+//
+// The popup is only there while it is open, so a call, text or voicemail that
+// arrives with it shut needs a Chrome notification to be noticed at all. The
+// offscreen document rings (offscreen/ringtone.ts) and finds the texts and
+// voicemails that are the rep's own (offscreen/live.ts); this raises them.
+//
+// With a CLOZR tab open, CLOZR already chimes for the rep's texts and
+// voicemail from the same stream, so these arrive silent: one sound, not two.
+// The incoming-call card is always silent; the ringtone is its sound, and
+// CLOZR stands its own softphone down while this one holds the line.
+
+const INCOMING_ID = 'talkr-incoming';
+
+/** chrome.notifications, promised; a failure (permission revoked, OS blocked) is not the caller's problem. */
+const notices = {
+  create: (id: string, o: chrome.notifications.NotificationOptions<true>) =>
+    new Promise<void>((done) => chrome.notifications.create(id, o, () => (void chrome.runtime.lastError, done()))),
+  update: (id: string, o: chrome.notifications.NotificationOptions<true>) =>
+    new Promise<void>((done) => chrome.notifications.update(id, o, () => (void chrome.runtime.lastError, done()))),
+  clear: (id: string) =>
+    new Promise<void>((done) => chrome.notifications.clear(id, () => (void chrome.runtime.lastError, done()))),
+};
+let incomingShown: string | null = null;
+const ICON = 'icons/128.png';
+
+async function syncIncomingNotice(snapshot: CallSnapshot): Promise<void> {
+  const from = snapshot.incoming?.from ?? null;
+  const label = snapshot.incoming ? (snapshot.incoming.contactName ?? formatE164(from ?? '')) : null;
+  if (!label) {
+    if (incomingShown) {
+      incomingShown = null;
+      await notices.clear(INCOMING_ID);
+    }
+    return;
+  }
+  if (label === incomingShown) return;
+  const first = incomingShown === null;
+  incomingShown = label;
+  const options: chrome.notifications.NotificationOptions<true> = {
+    type: 'basic',
+    iconUrl: ICON,
+    title: 'Incoming call',
+    message: label,
+    contextMessage: snapshot.incoming?.contactName && from ? formatE164(from) : 'Talkr',
+    buttons: [{ title: 'Answer' }, { title: 'Decline' }],
+    requireInteraction: true,
+    silent: true,
+    priority: 2,
+  };
+  // The contact name lands a moment after the ring; update the card in place.
+  if (first) await notices.create(INCOMING_ID, options);
+  else await notices.update(INCOMING_ID, options);
+}
+
+/** Which popup tab each open text/voicemail notification lands on when clicked. */
+const noticeViews = new Map<string, 'inbox' | 'voicemail'>();
+
+async function showLiveNotice(n: LiveNotice): Promise<void> {
+  noticeViews.set(n.key, n.kind === 'voicemail' ? 'voicemail' : 'inbox');
+  await notices.create(n.key, {
+    type: 'basic',
+    iconUrl: ICON,
+    title: n.title,
+    message: n.body,
+    contextMessage: n.kind === 'voicemail' ? 'Talkr voicemail' : 'Talkr text',
+    silent: clozrTabs.size > 0,
+    priority: 1,
+  });
+}
+
+async function setBadge(count: number): Promise<void> {
+  await chrome.action.setBadgeBackgroundColor({ color: '#e5484d' }).catch(() => undefined);
+  await chrome.action.setBadgeText({ text: count > 0 ? (count > 99 ? '99+' : String(count)) : '' }).catch(() => undefined);
+}
+
+/** Open the popup on a tab. openPopup needs Chrome 127 and a focused window; failing that the view waits for the next open. */
+async function openPopupOn(view: 'inbox' | 'voicemail' | 'dial'): Promise<void> {
+  await chrome.storage.local.set({ [STORAGE.pendingView]: view });
+  await chrome.action.openPopup().catch(() => undefined);
+}
+
+chrome.notifications.onButtonClicked.addListener((id, index) => {
+  if (id !== INCOMING_ID) return;
+  void notices.clear(id);
+  incomingShown = null;
+  const command: Command = index === 0 ? { type: 'acceptIncoming' } : { type: 'rejectIncoming' };
+  void chrome.runtime.sendMessage(envelope<Command>(command)).catch(() => undefined);
+  if (index === 0) void openPopupOn('dial');
+});
+
+chrome.notifications.onClicked.addListener((id) => {
+  void notices.clear(id);
+  if (id === INCOMING_ID) {
+    incomingShown = null;
+    void openPopupOn('dial');
+    return;
+  }
+  void openPopupOn(noticeViews.get(id) ?? 'inbox');
+  noticeViews.delete(id);
+});
+
 /**
  * React to the call's state, once per change. Chrome delivers a broadcast on
  * every patch — a roster poll is one every two seconds — so anything here has
@@ -561,6 +709,7 @@ let lastCallPhase: CallSnapshot['phase'] = 'idle';
  * posts sixty identical events at the CRM.
  */
 async function onSnapshot(snapshot: CallSnapshot): Promise<void> {
+  void syncIncomingNotice(snapshot);
   const holding = snapshot.device === 'ready';
   if (holding !== softphoneHolding) {
     softphoneHolding = holding;

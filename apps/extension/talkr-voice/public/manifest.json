@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Talkr",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "Cloud dialer: dial, text, and run the call from any tab. Click any phone number on any page to call it.",
   "minimum_chrome_version": "116",
   "permissions": [
@@ -10,7 +10,8 @@
     "sidePanel",
     "contextMenus",
     "tabs",
-    "identity"
+    "identity",
+    "notifications"
   ],
   "host_permissions": [
     "http://localhost:4000/*",

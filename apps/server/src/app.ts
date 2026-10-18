@@ -110,6 +110,16 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     },
   );
 
+  // JSON keeps its raw bytes too: Telnyx signs `{timestamp}|{raw body}` on its
+  // JSON (Messaging API v2) webhooks, and a re-serialized parse never
+  // verifies. Parsing itself stays Fastify's own (prototype-poisoning checks).
+  const defaultJsonParser = app.getDefaultJsonParser('error', 'error');
+  app.removeContentTypeParser('application/json');
+  app.addContentTypeParser('application/json', { parseAs: 'string' }, (req, body, done) => {
+    req.rawBodyString = body as string;
+    defaultJsonParser(req, body as string, done);
+  });
+
   app.decorateRequest('authCtx', null);
 
   app.addHook('onSend', async (req, reply) => {

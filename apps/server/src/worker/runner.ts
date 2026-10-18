@@ -27,12 +27,16 @@ export class JobRunner {
     private readonly options: RunnerOptions = {},
   ) {}
 
-  /** Process one batch of due jobs. Returns how many jobs ran. Used by tests. */
-  async runOnce(): Promise<number> {
+  /**
+   * Process one batch of due jobs, or only the job with `dedupeKey`. Returns
+   * how many jobs ran. Used by tests, the serverless tick, and kickJob.
+   */
+  async runOnce(opts: { dedupeKey?: string } = {}): Promise<number> {
     const { dbh, logger } = this.deps;
     const jobs = await claimJobs(dbh.db, {
       workerId: this.workerId,
-      limit: this.options.batchSize ?? 10,
+      limit: opts.dedupeKey ? 1 : (this.options.batchSize ?? 10),
+      dedupeKey: opts.dedupeKey,
     });
     for (const job of jobs) {
       const handler = this.handlers[job.jobType];

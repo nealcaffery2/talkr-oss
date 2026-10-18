@@ -73,6 +73,8 @@ const MESSAGE_STATUS_MAP: Record<string, string> = {
   // Telnyx's messaging vocabulary also surfaces these on TeXML callbacks.
   'delivery_failed': 'failed',
   'delivery_unconfirmed': 'sent',
+  // Messaging API v2 events only.
+  'sending_failed': 'failed',
 };
 
 function occurredAt(params: P): Date {
@@ -311,4 +313,52 @@ export function normalizeTelnyxWebhook(endpoint: TelnyxEndpoint, params: P): Can
       return [event];
     }
   }
+}
+
+/**
+ * A Messaging API v2 event (`{data: {record_type: 'event', event_type,
+ * payload}}`, JSON, signed with Ed25519) as the flat TeXML-style params the
+ * rest of this file reads. The messaging profile posts v2 JSON, not the
+ * 2010-04-01 form shape, so without this every delivery receipt and every
+ * inbound text was rejected. Null when the body is not a v2 message event.
+ */
+export function flattenMessagingEvent(endpoint: string, body: unknown): P | null {
+  if (endpoint !== 'inbound-sms' && endpoint !== 'sms-status') return null;
+  const data = (body as { data?: Record<string, unknown> } | null)?.data;
+  if (!data || data.record_type !== 'event' || typeof data.event_type !== 'string') return null;
+  const payload = data.payload as Record<string, unknown> | undefined;
+  if (!payload || typeof payload.id !== 'string' || !payload.id) return null;
+
+  const to = Array.isArray(payload.to) ? (payload.to as Array<Record<string, unknown>>) : [];
+  const first = to[0] ?? {};
+  const from = (payload.from ?? {}) as Record<string, unknown>;
+  const str = (v: unknown): string => (typeof v === 'string' ? v : '');
+  const out: P = {
+    MessageSid: payload.id,
+    From: str(from.phone_number),
+    To: str(first.phone_number) || (typeof payload.to === 'string' ? payload.to : ''),
+    EventType: data.event_type,
+  };
+  if (typeof data.occurred_at === 'string') out.Timestamp = data.occurred_at;
+  if (typeof payload.parts === 'number') out.NumSegments = String(payload.parts);
+
+  if (endpoint === 'inbound-sms') {
+    out.Body = str(payload.text);
+    out.MessageStatus = 'received';
+    const media = Array.isArray(payload.media) ? (payload.media as Array<Record<string, unknown>>) : [];
+    const urls = media.filter((m) => typeof m.url === 'string' && m.url);
+    out.NumMedia = String(urls.length);
+    urls.forEach((m, i) => {
+      out[`MediaUrl${i}`] = str(m.url);
+      if (typeof m.content_type === 'string') out[`MediaContentType${i}`] = m.content_type;
+    });
+    return out;
+  }
+
+  // The recipient's status is the message's; message.sent carries `sent`.
+  out.MessageStatus = str(first.status) || (data.event_type === 'message.sent' ? 'sent' : '');
+  const errors = Array.isArray(payload.errors) ? (payload.errors as Array<Record<string, unknown>>) : [];
+  const code = errors[0]?.code;
+  if (code != null && code !== '') out.ErrorCode = String(code);
+  return out;
 }

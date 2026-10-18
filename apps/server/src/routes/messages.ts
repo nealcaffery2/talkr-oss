@@ -31,6 +31,7 @@ import {
   type ConversationListRow,
 } from '../services/messages.js';
 import { DEFAULT_TIMEZONE, orgTimezone } from '../services/reports.js';
+import { kickJob } from '../services/job-kick.js';
 
 function requirePermission(permission: Permission) {
   return async (req: FastifyRequest, reply: FastifyReply) => {
@@ -201,8 +202,10 @@ export function registerMessageRoutes(app: FastifyInstance, deps: AppDeps): void
         mediaUrls: parsed.data.media_urls,
         fromPhoneNumberId: parsed.data.from_phone_number_id,
       });
+      // Hand it to the carrier now, not on the worker's next tick.
+      await kickJob(`send-message:${result.message.id}`);
       return reply.code(201).send({
-        message: serializeMessage(result.message),
+        message: serializeMessage(result.message, result),
         conversation_id: result.conversationId,
         // Sent, but from a line carriers are likely to filter (10DLC); null otherwise.
         ...(result.warning ? { warning: result.warning } : {}),
@@ -290,7 +293,7 @@ export function registerMessageRoutes(app: FastifyInstance, deps: AppDeps): void
         .limit(500);
       return {
         conversation_id: conversation.id,
-        messages: rows.map(serializeMessage),
+        messages: rows.map((m) => serializeMessage(m, conversation)),
       };
     },
   );

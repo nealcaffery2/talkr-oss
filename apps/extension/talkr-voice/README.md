@@ -233,6 +233,72 @@ own down rather than registering a second one. Calls placed here are mirrored
 onto the CLOZR page as they ring, connect and end, so the record is not the
 last to know what its own phone did.
 
+## Only the rep's own calls and texts
+
+The extension is one rep's phone. An owner or admin's Talkr lists are the whole
+office's, so Inbox, Recents and Voicemail keep only the signed-in rep's, by
+the same rules as CLOZR's inbox (`src/shared/owner.ts`, CLOZR's
+`lib/inbox-owner.ts`):
+
+- **A text thread** is the rep's whose line carries it; on a shared line, the
+  assignee's. The inbox reads the threads assigned to the rep plus the threads
+  on each of their lines (`api.listMyConversations`).
+- **A call** is the rep's who handled it. One nobody picked up (missed, a
+  voicemail) is whoever the voicemail was for, else the owner of the line it
+  rang. The server applies the same rule to its "own" scope
+  (`apps/server/src/services/call-owner.ts`), so a rep can see and play the
+  voicemails left on their own number.
+
+**Line filter.** With more than one line in play, the Inbox has a line picker
+(CLOZR's `line` filter): only the threads and calls on that number. The
+options are the rep's own lines plus any line one of their threads is on
+(`src/shared/lines.ts`).
+
+## Texting from a line
+
+A thread's composer says which line the text leaves from. It defaults to the
+line already carrying the thread, so the seller keeps one conversation, or to
+the rep's default on a new one (CLOZR's `lib/thread-line.ts`; a transaction
+coordinator texts on her own line rather than a teammate's). The rep can pick
+any of their own lines instead; the pick is sent as `from_phone_number_id` and
+stands until another thread is opened.
+
+## Presence and Do not disturb
+
+The status under *Talkr* in the popup header is a picker: **Available**, **Do
+not disturb** or **Away**, the same three as CLOZR (`src/shared/presence.ts`).
+
+- The offscreen document's 30-second heartbeat (`POST /v1/presence`) sends
+  `available` only when Available is picked and the softphone is registered;
+  otherwise `away`. A change is sent at once.
+- **Do not disturb** declines every incoming call in the offscreen document,
+  including one already ringing when it is turned on, so the caller reaches
+  voicemail. Dialling out is unaffected.
+- The pick lives in `chrome.storage` (`talkr_presence`) via the service worker,
+  since the offscreen document has no storage API. The worker hands it to the
+  document each time it creates one, and it survives sign-out.
+
+## Notifications, ringing and the toolbar badge
+
+The offscreen document keeps Talkr's live stream open (`GET /v1/events/stream`,
+`src/offscreen/live.ts`) and rings incoming calls itself
+(`src/offscreen/ringtone.ts`); the service worker raises the Chrome
+notifications:
+
+- **Incoming call:** a notification with *Answer* / *Decline*, and a ring, with
+  the popup shut.
+- **New text or voicemail** that is the rep's own: a notification; clicking it
+  opens the popup on Inbox or Voicemail. An admin is not alerted to the rest of
+  the office's.
+- **Badge:** the number of the rep's threads with something unread.
+- An open popup re-reads its lists when the stream says something moved, and
+  an open thread shows a reply as it lands.
+
+**With CLOZR open** nothing doubles up: CLOZR stands its softphone down while
+this one is registered (so only one rings), and CLOZR already chimes for texts
+and voicemail, so the extension's text and voicemail notifications arrive
+silent while a CLOZR tab is open.
+
 ## Smoke test before handing it out
 
 Nothing here is covered by `npm run build` — a carrier, a microphone and
@@ -264,17 +330,25 @@ broken when it fails.
 5. **Close the popup mid-call.** Audio must keep going. That is the offscreen
    document doing its job.
 6. **Take an inbound call.** Ring your Talkr number with everything closed.
-   The popup should show the caller, with the contact's name if Talkr knows
-   them.
-7. **One softphone.** With the extension's softphone up, the CLOZR tab's
+   It should ring and raise an *Incoming call* notification; *Answer* on it
+   connects. The popup should show the caller, with the contact's name if
+   Talkr knows them. — No notification: Windows/macOS notifications for Chrome
+   are off, or Focus Assist is on.
+7. **Text and voicemail.** Text your Talkr number, then call it and leave a
+   voicemail. Each raises a notification and the badge counts the unread
+   thread. Signed in as an admin, a text to a teammate's line must not.
+8. **One softphone.** With the extension's softphone up, the CLOZR tab's
    dialer should say calls are running through the extension, and dialling
    there should hand the call over rather than opening a second one.
-8. **Click to call.** On any page with a phone number on it — a county
+9. **Click to call.** On any page with a phone number on it — a county
    appraisal district site is the honest test — the numbers carry a dotted
    underline; clicking one dials it. Then check it has *not* marked up an
    invoice total, a date or an order number. Select a number inside a form
    field and use the floating Call button. Right-click a `tel:` link.
-9. **Switch it off.** Account → Click to call → toggle this site off. The
+10. **Do not disturb.** Set the header status to *Do not disturb* and ring
+   your Talkr number: nothing rings and the caller reaches voicemail. Set it
+   back to *Available* and it rings again.
+11. **Switch it off.** Account → Click to call → toggle this site off. The
    underlines disappear and the page is back exactly as it was.
 
 ## Known limits

@@ -47,6 +47,8 @@ export interface ClaimOptions {
   workerId: string;
   queues?: string[];
   limit?: number;
+  /** Only the job with this dedupe_key (a send run the moment it is queued). */
+  dedupeKey?: string;
 }
 
 /** Claim due jobs. Increments attempts as part of the claim. */
@@ -69,6 +71,7 @@ export async function claimJobs(db: DbLike, opts: ClaimOptions): Promise<JobRow[
       WHERE status = 'pending'
         AND run_at <= now()
         AND queue IN (${queueList})
+        AND (${opts.dedupeKey ?? null}::text IS NULL OR dedupe_key = ${opts.dedupeKey ?? null})
       ORDER BY priority DESC, run_at ASC
       LIMIT ${limit}
       FOR UPDATE SKIP LOCKED

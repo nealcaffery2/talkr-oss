@@ -307,6 +307,9 @@ async function parseError(res: Response): Promise<ApiError> {
 export interface AuthConfigDto {
   password_signin: boolean;
   token_signin: boolean;
+  google_signin: boolean;
+  /** The public OAuth client id; null unless the server enables Google. */
+  google_client_id: string | null;
   /** The server runs unauthenticated requests as a fixed user: no sign-in needed. */
   open_access: boolean;
 }
@@ -325,6 +328,26 @@ export const auth = {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ email, password }),
+      });
+    } catch {
+      throw new ApiError(0, 'backend_unreachable', `Can't reach the Talkr API at ${apiUrl()}.`);
+    }
+    if (!res.ok) throw await parseError(res);
+    const body = (await res.json()) as SessionResponse;
+    storeSession(body);
+    return body.user;
+  },
+  /**
+   * Trade a Google id_token (from lib/googleSignIn) for a session. A rep who
+   * was only ever invited by email is claimed by that first sign-in.
+   */
+  signInWithGoogle: async (idToken: string, nonce: string): Promise<SessionUser> => {
+    let res: Response;
+    try {
+      res = await fetch(`${apiUrl()}/v1/auth/google`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ id_token: idToken, nonce }),
       });
     } catch {
       throw new ApiError(0, 'backend_unreachable', `Can't reach the Talkr API at ${apiUrl()}.`);

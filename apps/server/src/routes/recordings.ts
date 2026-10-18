@@ -16,10 +16,11 @@ import { and, desc, eq } from 'drizzle-orm';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { Permission, RecordingMedia } from '@talkr/core';
-import { enqueueJob, schema } from '@talkr/db';
+import { enqueueJob, schema, type Db } from '@talkr/db';
 import type { AppDeps } from '../app.js';
 import { hasPermission, type AuthContext } from '../auth.js';
 import { writeAudit } from '../services/audit.js';
+import { ownsCall } from '../services/call-owner.js';
 import type { TranscriptSegment } from '../services/transcription.js';
 import { makeRecordingMediaFetcher, type RecordingMediaFetcher } from '../services/recording-media.js';
 
@@ -44,8 +45,8 @@ function requirePermission(permission: Permission) {
   };
 }
 
-function canSee(ctx: AuthContext, call: CallRow): boolean {
-  return hasPermission(ctx, 'recordings.listen.org') || call.userId === ctx.userId;
+async function canSee(db: Db, ctx: AuthContext, call: CallRow): Promise<boolean> {
+  return hasPermission(ctx, 'recordings.listen.org') || (await ownsCall(db, call, ctx.userId));
 }
 
 /**
@@ -113,7 +114,7 @@ export function registerRecordingsRoutes(
         .limit(1)
     )[0];
     if (!row) return { ok: false, code: 404 };
-    if (!canSee(ctx, row.call)) return { ok: false, code: 403 };
+    if (!(await canSee(dbh.db, ctx, row.call))) return { ok: false, code: 403 };
     return { ok: true, recording: row.recording, call: row.call };
   }
 
@@ -192,7 +193,7 @@ export function registerRecordingsRoutes(
           .limit(1)
       )[0];
       if (!call) return deny(reply, 404);
-      if (!canSee(ctx, call)) return deny(reply, 403);
+      if (!(await canSee(dbh.db, ctx, call))) return deny(reply, 403);
 
       const [recs, transcripts, disposition] = await Promise.all([
         dbh.db.select().from(schema.recordings).where(eq(schema.recordings.callId, call.id)),

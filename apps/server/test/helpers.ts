@@ -324,6 +324,33 @@ export async function webhookPost(
   });
 }
 
+/**
+ * A Telnyx Messaging API v2 webhook: JSON, signed over `{timestamp}|{raw JSON}`
+ * exactly as the carrier delivers it (production messaging profiles post this
+ * shape, not the 2010-04-01 form).
+ */
+export async function webhookPostJson(
+  ctx: TestContext,
+  path: string,
+  payload: unknown,
+  opts: { tamperSignature?: boolean } = {},
+) {
+  const body = JSON.stringify(payload);
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  const signed = sign(null, Buffer.from(`${timestamp}|${body}`, 'utf8'), TELNYX_KEYS.privateKey);
+  if (opts.tamperSignature) signed.writeUInt8(signed.readUInt8(0) ^ 0xff, 0);
+  return ctx.app.inject({
+    method: 'POST',
+    url: path,
+    headers: {
+      'content-type': 'application/json',
+      [SIGNATURE_HEADER]: signed.toString('base64'),
+      [TIMESTAMP_HEADER]: timestamp,
+    },
+    payload: body,
+  });
+}
+
 /** The SIP URI Telnyx rings a rep's browser at: the credential the harness minted for them. */
 export async function repAddress(ctx: TestContext, userId: string): Promise<string> {
   const [cred] = await ctx.dbh.db

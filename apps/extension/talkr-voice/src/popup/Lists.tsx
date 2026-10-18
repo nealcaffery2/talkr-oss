@@ -4,11 +4,12 @@
  * caller-ID sheet. Rows open the lead; the round buttons call back.
  */
 
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { Icon, type IconName } from '@/shared/Icon';
 import { Avatar } from '@/shared/ui';
 import { api, type ConversationDto, type HistoryItemDto, type MeDto } from '@/shared/api';
 import { duration, formatPhone, stamp } from '@/shared/time';
+import { callLineId, inboxLineOptions, lineLabel, threadLineId } from '@/shared/lines';
 
 /** The number on the other end of a call, whichever way it went. */
 export function theirNumber(c: HistoryItemDto): string {
@@ -211,6 +212,7 @@ export function InboxList({
   conversations,
   calls,
   now,
+  me,
   onOpenThread,
   onOpenLead,
   onCall,
@@ -218,11 +220,17 @@ export function InboxList({
   conversations: ConversationDto[];
   calls: HistoryItemDto[];
   now: number;
+  /** For the line filter: the rep's lines and the org's, to name them. */
+  me: MeDto | null;
   onOpenThread: (id: string) => void;
   onOpenLead: (e164: string) => void;
   onCall: (e164: string) => void;
 }) {
   const [filter, setFilter] = useState<InboxFilter>('all');
+  // One sending number only (CLOZR's `line` filter), over the rep's own threads and calls.
+  const [line, setLine] = useState('');
+  const lines = useMemo(() => inboxLineOptions(me, conversations), [me, conversations]);
+  const onLine = line && lines.some((n) => n.id === line) ? line : '';
   const [q, setQ] = useState('');
   const needle = q.trim().toLowerCase();
   const digits = needle.replace(/\D/g, '');
@@ -234,6 +242,7 @@ export function InboxList({
   if (filter !== 'calls') {
     for (const c of conversations) {
       if (filter === 'unread' && c.unread_count === 0) continue;
+      if (onLine && threadLineId(c, me) !== onLine) continue;
       if (!matches(c.contact_name, c.their_number)) continue;
       const name = c.contact_name ?? formatPhone(c.their_number);
       items.push({
@@ -258,6 +267,7 @@ export function InboxList({
     for (const c of calls) {
       const number = theirNumber(c);
       if (filter === 'unread' && !isMissed(c) && !isVoicemail(c)) continue;
+      if (onLine && callLineId(c, me) !== onLine) continue;
       if (!matches(c.contact_name, number)) continue;
       items.push({
         at: c.at,
@@ -314,6 +324,29 @@ export function InboxList({
             ['unread', 'Unread'],
           ]}
         />
+        {lines.length > 1 && (
+          <select
+            value={onLine}
+            onChange={(e) => setLine(e.target.value)}
+            aria-label="Line"
+            style={{
+              height: 28,
+              padding: '0 8px',
+              borderRadius: 9,
+              border: 'none',
+              background: 'var(--panel-2)',
+              color: onLine ? 'var(--text)' : 'var(--muted)',
+              font: '500 12px/1 Inter',
+            }}
+          >
+            <option value="">All lines</option>
+            {lines.map((n) => (
+              <option key={n.id} value={n.id}>
+                {lineLabel(n, formatPhone)}
+              </option>
+            ))}
+          </select>
+        )}
       </ListHeader>
       <div className="scroll" style={{ flex: 1 }}>
         {items.length === 0 ? <Empty>{needle ? 'Nothing matches.' : 'Nothing here yet.'}</Empty> : items.slice(0, 200).map((i) => i.node)}

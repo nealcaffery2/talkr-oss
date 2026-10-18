@@ -16,6 +16,9 @@
 
 import { ApiError, api } from '@/shared/api';
 import { onSessionChanged } from '@/shared/session';
+import { startLive, stopLive } from './live';
+import { startRingtone, stopRingtone } from './ringtone';
+import { heartbeatStatus } from '@/shared/presence';
 import {
   COMMAND_TARGET,
   EMPTY_SNAPSHOT,
@@ -241,13 +244,20 @@ async function initDevice(): Promise<void> {
     scheduleTokenRenewal(token.ttl_seconds);
     patch({ device: 'ready', provider: created.kind });
 
-    // Presence: routing only rings browsers that are actually alive.
-    void api.heartbeat('available').catch(() => undefined);
+    // Presence: routing only rings browsers that are actually alive, and a
+    // rep who picked Away or Do not disturb stays that way (shared/presence.ts).
+    beat();
     if (heartbeat) clearInterval(heartbeat);
-    heartbeat = setInterval(() => void api.heartbeat('available').catch(() => undefined), 30_000);
+    heartbeat = setInterval(beat, 30_000);
   } catch (err) {
     patch({ device: 'error', deviceError: (err as Error).message });
   }
+}
+
+/** Tell Talkr whether this rep can take a call: what they picked, if the phone is up. */
+function beat(): void {
+  const status = heartbeatStatus(snapshot.presence, snapshot.device === 'ready');
+  void api.heartbeat(status).catch(() => undefined);
 }
 
 function onIncoming(call: EngineCall): void {
@@ -287,13 +297,18 @@ function onIncoming(call: EngineCall): void {
 }
 
 function ringIncoming(call: EngineCall): void {
-  if (activeCall || incomingCall) {
+  // Do not disturb: declined, so the caller reaches voicemail and nothing
+  // rings over what the rep is doing.
+  if (activeCall || incomingCall || snapshot.presence === 'dnd') {
     call.reject();
     return;
   }
   incomingCall = call;
   const from = call.from ?? 'Unknown';
   patch({ incoming: { from, contactName: null } });
+  // Rings even with the popup shut: the service worker raises the
+  // notification, and this is the sound (offscreen may play audio).
+  startRingtone();
   void api
     .lookupPhone(from)
     .then((ctx) => {
@@ -303,6 +318,7 @@ function ringIncoming(call: EngineCall): void {
     })
     .catch(() => undefined);
   const clearIncoming = () => {
+    stopRingtone();
     if (incomingCall !== call) return;
     incomingCall = null;
     patch({ incoming: null });
@@ -454,6 +470,7 @@ function watchBrowserLeg(callId: string, onDead: (err: Error) => void): Promise<
 function acceptIncoming(): void {
   const call = incomingCall;
   const info = snapshot.incoming;
+  stopRingtone();
   if (!call || !info) return;
   incomingCall = null;
   activeCall = call;
@@ -546,6 +563,7 @@ async function handle(command: Command): Promise<void> {
       acceptIncoming();
       return;
     case 'rejectIncoming':
+      stopRingtone();
       incomingCall?.reject();
       incomingCall = null;
       patch({ incoming: null });
@@ -602,6 +620,19 @@ async function handle(command: Command): Promise<void> {
         patch({ error: `Could not switch audio: ${(err as Error).message}` });
       }
       return;
+    case 'setPresence':
+      if (command.presence === snapshot.presence) return;
+      patch({ presence: command.presence });
+      // Talkr hears it now, not at the next 30 s beat, while the phone is up.
+      if (engine) beat();
+      // Turned on mid-ring: that call goes to voicemail too.
+      if (command.presence === 'dnd' && incomingCall) {
+        stopRingtone();
+        incomingCall.reject();
+        incomingCall = null;
+        patch({ incoming: null });
+      }
+      return;
     case 'finishWrapup':
       stopPolling();
       patch({
@@ -639,11 +670,16 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
  * incoming call can ring without the popup being opened; signing out tears
  * it down so a shared machine does not keep ringing for the previous rep.
  */
+const bumpInbox = () => patch({ inboxTick: snapshot.inboxTick + 1 });
+
 onSessionChanged((s) => {
   if (s) {
     if (!engine && snapshot.device !== 'initializing') void initDevice();
+    startLive(bumpInbox);
     return;
   }
+  stopLive();
+  stopRingtone();
   if (activeCall) activeCall.disconnect();
   engine?.destroy();
   engine = null;
@@ -654,10 +690,12 @@ onSessionChanged((s) => {
   clearTimers();
   reregisterAttempt = 0;
   stopPolling();
-  patch({ ...EMPTY_SNAPSHOT });
+  patch({ ...EMPTY_SNAPSHOT, presence: snapshot.presence });
 });
 
 // Enabling the softphone on load means the first incoming call can ring the
 // rep without them having opened the popup first. Without a session this fails
 // fast with 'unauthenticated' and the sign-in broadcast retries it.
 void initDevice();
+// Texts and voicemail alert whether or not the softphone came up (no mic yet).
+startLive(bumpInbox);

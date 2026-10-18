@@ -4,7 +4,8 @@
  * Account: sign in, see who you are signed in as, sign out.
  *
  * Sign-in is email + password against the rep's Talkr workspace (Supabase
- * Auth, proxied by the API). Pasting an access token stays available behind
+ * Auth, proxied by the API), or "Continue with Google" when the server has a
+ * Google client id (lib/googleSignIn, finished on /login/google). Pasting an access token stays available behind
  * "Advanced" for a developer against a local API, or a server that has not
  * enabled password sign-in — it is never the first thing a rep sees.
  *
@@ -28,6 +29,7 @@ import {
 } from '@/lib/api';
 import { PhoneText } from '@/components/CopyPhone';
 import { tzAbbr } from '@/lib/time';
+import { buildGoogleAuthorize, saveGoogleAttempt } from '@/lib/googleSignIn';
 
 const INPUT =
   'mt-1.5 w-full rounded-[10px] border border-[var(--line)] bg-[var(--panel)] px-3 py-2.5 text-[13px] outline-none focus:border-[var(--accent)]';
@@ -92,6 +94,7 @@ function LoginScreen() {
         <OpenAccessCard me={me} />
       ) : (
         <SignInForm
+          returnTo={returnTo}
           onSignedIn={(u) => {
             setUser(u);
             api.getMe().then(setMe).catch(() => undefined);
@@ -103,7 +106,7 @@ function LoginScreen() {
   );
 }
 
-function SignInForm({ onSignedIn }: { onSignedIn: (u: SessionUser) => void }) {
+function SignInForm({ returnTo, onSignedIn }: { returnTo: string; onSignedIn: (u: SessionUser) => void }) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
@@ -113,6 +116,8 @@ function SignInForm({ onSignedIn }: { onSignedIn: (u: SessionUser) => void }) {
   const [apiInput, setApiInput] = useState('');
   const [token, setToken] = useState('');
   const [passwordEnabled, setPasswordEnabled] = useState<boolean | null>(null);
+  const [googleClientId, setGoogleClientId] = useState<string | null>(null);
+  const [leaving, setLeaving] = useState(false);
 
   useEffect(() => {
     setApiInput(apiUrl());
@@ -120,6 +125,7 @@ function SignInForm({ onSignedIn }: { onSignedIn: (u: SessionUser) => void }) {
       .config()
       .then((c) => {
         setPasswordEnabled(c.password_signin);
+        setGoogleClientId(c.google_signin ? c.google_client_id : null);
         if (!c.password_signin) setAdvanced(true);
       })
       .catch(() => setPasswordEnabled(true));
@@ -139,6 +145,19 @@ function SignInForm({ onSignedIn }: { onSignedIn: (u: SessionUser) => void }) {
 
   const canSubmit = email.trim().length > 3 && password.length > 0 && !busy;
 
+  async function continueWithGoogle(clientId: string) {
+    setLeaving(true);
+    setError(null);
+    try {
+      const { url, attempt } = await buildGoogleAuthorize(clientId, window.location.origin, returnTo);
+      saveGoogleAttempt(attempt);
+      window.location.assign(url);
+    } catch (err) {
+      setLeaving(false);
+      setError((err as Error).message);
+    }
+  }
+
   return (
     <form
       onSubmit={(e) => {
@@ -152,9 +171,30 @@ function SignInForm({ onSignedIn }: { onSignedIn: (u: SessionUser) => void }) {
         <p className="text-[12px] text-[var(--muted)]">Your Talkr workspace</p>
       </div>
 
+      {googleClientId && (
+        <>
+          <button
+            type="button"
+            disabled={leaving || busy}
+            onClick={() => void continueWithGoogle(googleClientId)}
+            className="mt-6 inline-flex h-10 w-full items-center justify-center gap-2 rounded-[10px] border border-[var(--line)] bg-[var(--panel)] text-[13px] font-semibold disabled:opacity-40"
+          >
+            <GoogleMark />
+            {leaving ? 'Opening Google…' : 'Continue with Google'}
+          </button>
+          {passwordEnabled !== false && (
+            <div className="mt-5 flex items-center gap-3 text-[11px] text-[var(--muted)]" aria-hidden="true">
+              <span className="h-px flex-1 bg-[var(--line)]" />
+              or with email
+              <span className="h-px flex-1 bg-[var(--line)]" />
+            </div>
+          )}
+        </>
+      )}
+
       {passwordEnabled !== false && (
         <>
-          <label className="mt-6 block">
+          <label className={googleClientId ? 'mt-4 block' : 'mt-6 block'}>
             <span className={EYEBROW}>Email</span>
             <input
               type="email"
@@ -275,6 +315,18 @@ function SignInForm({ onSignedIn }: { onSignedIn: (u: SessionUser) => void }) {
         )}
       </div>
     </form>
+  );
+}
+
+/** Google's "G", as its brand guidelines ask for on a sign-in button. */
+function GoogleMark() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 48 48" aria-hidden="true">
+      <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z" />
+      <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z" />
+      <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z" />
+      <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z" />
+    </svg>
   );
 }
 

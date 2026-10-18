@@ -10,6 +10,7 @@
 
 import type { ParticipantDto } from './api';
 import type { EngineKind } from '@/offscreen/engine';
+import type { Presence } from './presence';
 
 export type CallPhase = 'idle' | 'connecting' | 'ringing' | 'in_call' | 'wrapup';
 export type DeviceStatus = 'uninitialized' | 'initializing' | 'ready' | 'error';
@@ -40,6 +41,10 @@ export interface CallSnapshot {
   /** Selected devices, or null for the browser default. */
   audioInputId: string | null;
   audioOutputId: string | null;
+  /** Bumped when the live stream says the rep's texts, calls or voicemail moved: re-read the lists. */
+  inboxTick: number;
+  /** What the rep picked (shared/presence.ts); Do not disturb declines incoming calls. */
+  presence: Presence;
 }
 
 export const EMPTY_SNAPSHOT: CallSnapshot = {
@@ -60,6 +65,8 @@ export const EMPTY_SNAPSHOT: CallSnapshot = {
   incoming: null,
   audioInputId: null,
   audioOutputId: null,
+  inboxTick: 0,
+  presence: 'available',
 };
 
 /** UI → offscreen. */
@@ -80,7 +87,9 @@ export type Command =
   | { type: 'completeTransfer' }
   | { type: 'finishWrapup' }
   /** Route the call's audio to a different microphone or speaker. */
-  | { type: 'setAudio'; kind: 'input' | 'output'; deviceId: string };
+  | { type: 'setAudio'; kind: 'input' | 'output'; deviceId: string }
+  /** From the service worker, which keeps the rep's pick in chrome.storage. */
+  | { type: 'setPresence'; presence: Presence };
 
 /** Offscreen → everyone. */
 export interface SnapshotBroadcast {
