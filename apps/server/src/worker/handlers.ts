@@ -7,12 +7,13 @@ import { dirname, join } from 'node:path';
 import { eq } from 'drizzle-orm';
 import type { CanonicalEvent, MessagingProvider, VoiceProvider } from '@talkr/core';
 import { enqueueJob, schema, type DbHandle, type JobRow } from '@talkr/db';
+import type { SendblueClient } from '@talkr/provider-sendblue';
 import type { Config } from '../config.js';
 import type { Logger } from '../logger.js';
 import { applyCanonicalEvent } from '../services/apply-events.js';
 import { formatDuration, type PodioClient } from '../services/podio.js';
 import { writeAudit } from '../services/audit.js';
-import { podioSyncMessageActivity, processSmsWebhook, sendQueuedMessage } from './sms-handlers.js';
+import { podioSyncMessageActivity, processSendblueWebhook, processSmsWebhook, sendQueuedMessage } from './sms-handlers.js';
 import { webhookDeliver, webhookFanout } from './webhook-fanout.js';
 import { extractProviderCosts } from './costs.js';
 import { workflowFanout, workflowTimeSweep } from './workflow-fanout.js';
@@ -22,6 +23,9 @@ import { conferenceDialCustomer } from './conference-handlers.js';
 import { transcribeRecording } from './transcribe-handlers.js';
 import { scoreCallJob } from './score-handlers.js';
 import { contactTemperatureSweep } from './contact-temperature-sweep.js';
+import { stuckCallSweep } from './stuck-call-sweep.js';
+import { recordingSweep } from './recording-sweep.js';
+import { smsStatusSweep } from './sms-status-sweep.js';
 import { missedCallText } from '../services/call-flows.js';
 import { retryFailedTranscripts } from './transcribe-handlers.js';
 import type { RecordingMediaFetcher } from '../services/recording-media.js';
@@ -39,6 +43,11 @@ export interface HandlerDeps {
   fetchRecordingMedia?: RecordingMediaFetcher;
   /** Outbound HTTP for the AI agent step and the completion router; tests inject a fake. */
   fetchImpl?: typeof fetch;
+  /**
+   * Sendblue (iMessage). Undefined builds it from SENDBLUE_* config; null is
+   * explicitly off. Tests inject a client with a fake transport.
+   */
+  sendblue?: SendblueClient | null;
 }
 
 export type JobHandler = (deps: HandlerDeps, job: JobRow) => Promise<void>;
@@ -330,6 +339,7 @@ export const HANDLERS: Record<string, JobHandler> = {
   'mirror-recording': mirrorRecording,
   // SMS (Phase 4 — docs/sms.md)
   'process-sms-webhook': processSmsWebhook,
+  'process-sendblue-webhook': processSendblueWebhook,
   'send-message': sendQueuedMessage,
   'podio-sync-message-activity': podioSyncMessageActivity,
   // Outbound webhooks (Phase 10 — docs/public-api.md)
@@ -354,6 +364,11 @@ export const HANDLERS: Record<string, JobHandler> = {
   'score-call': scoreCallJob,
   // Contacts (docs/contacts.md §4)
   'contact-temperature-sweep': contactTemperatureSweep,
+  'stuck-call-sweep': stuckCallSweep,
+  // Recordings the carrier made but never posted (worker/recording-sweep)
+  'recording-sweep': recordingSweep,
+  // Texts whose delivery receipt never arrived (worker/sms-status-sweep)
+  'sms-status-sweep': smsStatusSweep,
   // Call flows: text back a caller nobody answered
   'missed-call-text': missedCallText,
 };

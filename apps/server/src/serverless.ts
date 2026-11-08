@@ -41,6 +41,9 @@ import { seedWorkflowFanout } from './worker/workflow-fanout.js';
 import { seedDialerWatch } from './worker/dialer-handlers.js';
 import { scheduleContactTemperatureSweep } from './worker/contact-temperature-sweep.js';
 import { scheduleTranscriptRetrySweep } from './worker/transcribe-handlers.js';
+import { scheduleStuckCallSweep } from './worker/stuck-call-sweep.js';
+import { scheduleRecordingSweep } from './worker/recording-sweep.js';
+import { scheduleSmsStatusSweep } from './worker/sms-status-sweep.js';
 import { makeRecordingMediaFetcher } from './services/recording-media.js';
 
 /** How long one tick may spend draining the queue; the function limit is 60s. */
@@ -168,6 +171,12 @@ async function bootOnce(): Promise<Booted> {
         // Transcripts that failed on carrier media, re-queued within minutes
         // (docs/transcription.md §1).
         scheduleTranscriptRetrySweep(dbh.db),
+        // Outbound calls no carrier status ever ended (worker/stuck-call-sweep).
+        scheduleStuckCallSweep(dbh.db),
+        // Answered calls whose recording webhook never arrived (worker/recording-sweep).
+        scheduleRecordingSweep(dbh.db),
+        // Texts whose delivery receipt never arrived (worker/sms-status-sweep).
+        scheduleSmsStatusSweep(dbh.db),
       ]);
       let processed = 0;
       while (Date.now() - started < TICK_BUDGET_MS) {

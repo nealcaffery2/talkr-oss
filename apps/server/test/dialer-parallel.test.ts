@@ -8,6 +8,7 @@
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { eq } from 'drizzle-orm';
+import { ABANDONMENT_MIN_SAMPLE } from '@talkr/core';
 import { schema } from '@talkr/db';
 import { createTestContext, webhookPost, type TestContext, rungUsers } from './helpers.js';
 import { voiceStatus } from './fixtures/texml.js';
@@ -166,6 +167,27 @@ describe('parallel batch dialing', () => {
 });
 
 describe('abandonment (C4/C6)', () => {
+  // The cap is judged on a sample (core ABANDONMENT_MIN_SAMPLE), never on a
+  // handful of calls: give the campaign's 30-day window enough earlier
+  // answered calls that batch 2's one abandon makes a real rate.
+  beforeAll(async () => {
+    const earlier = ABANDONMENT_MIN_SAMPLE - 2; // batch 1's winner and batch 2's winner complete the sample
+    await ctx.dbh.db.insert(schema.calls).values(
+      Array.from({ length: earlier }, (_, i) => ({
+        orgId: ctx.seed.orgId,
+        direction: 'outbound' as const,
+        status: 'completed' as const,
+        userId: ctx.seed.repId,
+        fromNumber: '+15005550006',
+        toNumber: `+1614555${String(1000 + i)}`,
+        providerCallId: `CA_parallel_window_${i}`,
+        answeredAt: new Date(Date.now() - 3_600_000),
+        endedAt: new Date(Date.now() - 3_540_000),
+        raw: { campaignId },
+      })),
+    );
+  });
+
   it('the second batch dials; both answer — the loser is ABANDONED, journaled and counted', async () => {
     const result = await nextApi(ctx, rep, sessionId);
     expect(result.idle).toBe(false);

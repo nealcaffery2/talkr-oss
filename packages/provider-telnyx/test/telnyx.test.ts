@@ -238,6 +238,7 @@ describe('TeXML documents', () => {
     expect(res.body).toContain('talkr-abc-123');
     expect(res.body).toContain('statusCallbackEvent="start end join leave hold"');
     expect(res.body).toContain('record="record-from-start"');
+    expect(res.body).toContain('beep="false"');
   });
 
   it('escapes text that would otherwise break the document', () => {
@@ -313,6 +314,33 @@ describe('Telnyx REST', () => {
       To: '+12165550143',
       Url: 'https://talkr.test/twiml/campaign-answer',
     });
+  });
+
+  it('caps machine detection when asked so a quiet human is not held 30s', async () => {
+    const { provider, calls } = providerWith(
+      () => new Response(JSON.stringify({ sid: 'v3:amd-call' }), { status: 200 }),
+    );
+    await provider.createCall({
+      from: '+15125550134',
+      to: '+12165550143',
+      answerUrl: 'https://talkr.test/twiml/campaign-answer',
+      statusCallbackUrl: 'https://talkr.test/webhooks/telnyx/voice-status',
+      machineDetection: 'detect_message_end',
+      machineDetectionTimeoutMs: 6000,
+    });
+    expect(JSON.parse(calls[0]!.body)).toMatchObject({
+      MachineDetection: 'DetectMessageEnd',
+      MachineDetectionTimeout: '6000',
+    });
+  });
+
+  it('adds a participant without the join/leave beep unless asked', async () => {
+    const { provider, calls } = providerWith(
+      () => new Response(JSON.stringify({ call_sid: 'v3:cust-1' }), { status: 200 }),
+    );
+    provider.rememberConferenceSid('talkr-abc', 'conf-1');
+    await provider.addParticipant({ roomName: 'talkr-abc', callerId: '+15125550134', to: '+12165550143' });
+    expect(new URLSearchParams(calls[0]!.body).get('Beep')).toBe('false');
   });
 
   it('dials a whispering supervisor silently, coaching the rep, with no call status callback', async () => {

@@ -6,7 +6,16 @@
 import { eq } from 'drizzle-orm';
 import { isMessageEvent, maskPhone } from '@talkr/core';
 import { publishBusEvent, schema } from '@talkr/db';
+import { normalizeSendblueWebhook, SendblueApiError } from '@talkr/provider-sendblue';
 import { applyMessageEvent, findSmsSuppression } from '../services/messages.js';
+import {
+  chooseOutboundChannel,
+  lineForConversation,
+  resolveRcsLine,
+  resolveSendblue,
+  resolveSendblueLine,
+  sendblueStatusCallbackUrl,
+} from '../services/channels.js';
 import { writeAudit } from '../services/audit.js';
 import type { JobHandler } from './handlers.js';
 
@@ -41,6 +50,11 @@ export const processSmsWebhook: JobHandler = async (deps, job) => {
         : [];
     for (const event of events) {
       if (!isMessageEvent(event)) continue; // sms endpoints emit message events only
+      // Inbound RCS is addressed to the agent; file it under one of our lines.
+      if (event.type === 'message.received' && !event.data.to && event.data.channel === 'rcs' && event.data.from) {
+        const ours = await resolveRcsLine(dbh.db, deps.config, event.data.from);
+        if (ours) event.data.to = ours;
+      }
       const result = await applyMessageEvent(dbh, event, {
         webhookEventId: row.id,
         logger,
@@ -122,13 +136,69 @@ export const sendQueuedMessage: JobHandler = async (deps, job) => {
   }
 
   const mediaUrls = Array.isArray(message.mediaUrls) ? (message.mediaUrls as string[]) : [];
-  const { providerMessageId } = await provider.sendMessage({
-    from: conversation.ourNumber,
+
+  // iMessage or RCS when this deployment, this line and this recipient all
+  // allow it; SMS otherwise (docs/messaging-channels.md). Suppression above
+  // applies whatever the channel.
+  const sendblue = resolveSendblue(deps);
+  const line = await lineForConversation(dbh.db, conversation);
+  const route = await chooseOutboundChannel(dbh.db, {
+    config,
+    provider,
+    sendblue,
+    line,
     to: conversation.theirNumber,
-    body: message.body,
-    ...(mediaUrls.length > 0 ? { mediaUrls } : {}),
-    statusCallbackUrl: `${config.PUBLIC_BASE_URL}/webhooks/telnyx/sms-status`,
+    mediaCount: mediaUrls.length,
   });
+
+  let providerMessageId: string;
+  let providerName: string = provider.name;
+  let channel: 'sms' | 'imessage' | 'rcs' = 'sms';
+  let imessageId: string | null = null;
+  if (route.channel === 'imessage' && sendblue && route.sendblueFrom) {
+    try {
+      imessageId = (
+        await sendblue.sendMessage({
+          from: route.sendblueFrom,
+          to: conversation.theirNumber,
+          body: message.body,
+          ...(mediaUrls[0] ? { mediaUrl: mediaUrls[0] } : {}),
+          statusCallbackUrl: sendblueStatusCallbackUrl(config),
+        })
+      ).providerMessageId;
+    } catch (err) {
+      // A 4xx is Sendblue refusing the request (a line's new-contact cap, a
+      // validation rule): nothing was queued there, so the text goes as SMS
+      // now rather than waiting out retries. A 5xx or a dropped connection
+      // may have been accepted, so it retries like any provider error.
+      if (!(err instanceof SendblueApiError) || err.status < 400 || err.status >= 500) throw err;
+      logger.warn(
+        { messageId: message.id, status: err.status, err: err.message },
+        'sendblue refused the send; sending as SMS',
+      );
+    }
+  }
+  if (imessageId) {
+    providerMessageId = imessageId;
+    providerName = 'sendblue';
+    channel = 'imessage';
+  } else if (route.channel === 'rcs' && provider.sendRcsMessage) {
+    ({ providerMessageId } = await provider.sendRcsMessage({
+      to: conversation.theirNumber,
+      body: message.body,
+      smsFallbackFrom: conversation.ourNumber,
+      statusCallbackUrl: `${config.PUBLIC_BASE_URL}/webhooks/telnyx/sms-status`,
+    }));
+    channel = 'rcs';
+  } else {
+    ({ providerMessageId } = await provider.sendMessage({
+      from: conversation.ourNumber,
+      to: conversation.theirNumber,
+      body: message.body,
+      ...(mediaUrls.length > 0 ? { mediaUrls } : {}),
+      statusCallbackUrl: `${config.PUBLIC_BASE_URL}/webhooks/telnyx/sms-status`,
+    }));
+  }
 
   // Stamp the SID; only advance queued → sending (a fast status callback can
   // only be applied after this row is committed, so the guard is belt-and-
@@ -137,6 +207,8 @@ export const sendQueuedMessage: JobHandler = async (deps, job) => {
     .update(schema.messages)
     .set({
       providerMessageSid: providerMessageId,
+      provider: providerName,
+      channel,
       status: message.status === 'queued' ? 'sending' : message.status,
     })
     .where(eq(schema.messages.id, message.id));
@@ -145,13 +217,77 @@ export const sendQueuedMessage: JobHandler = async (deps, job) => {
     type: 'message.updated',
     orgId: message.orgId,
     status: 'sending',
-    data: { conversationId: conversation.id, messageId: message.id },
+    data: { conversationId: conversation.id, messageId: message.id, channel },
   }).catch(() => undefined);
 
   logger.info(
-    { messageId: message.id, providerMessageId, to: maskPhone(conversation.theirNumber) },
+    {
+      messageId: message.id,
+      providerMessageId,
+      channel,
+      channelReason: route.reason,
+      to: maskPhone(conversation.theirNumber),
+    },
     'message handed to provider',
   );
+};
+
+// ---------------------------------------------------------------------------
+// process-sendblue-webhook: a stored Sendblue delivery → canonical events.
+// Inbound iMessage arrives on a Sendblue number; it is filed under the Talkr
+// line that number belongs to, so SMS and iMessage with one person share a
+// thread and every inbound rule (STOP/HELP/START, Podio, unread) applies.
+// ---------------------------------------------------------------------------
+export const processSendblueWebhook: JobHandler = async (deps, job) => {
+  const { dbh, config, logger } = deps;
+  const { webhookEventId } = job.payload as { webhookEventId: string };
+  const row = (
+    await dbh.db.select().from(schema.webhookEvents).where(eq(schema.webhookEvents.id, webhookEventId)).limit(1)
+  )[0];
+  if (!row) throw new Error(`webhook event ${webhookEventId} not found`);
+  if (row.status === 'processed') return;
+
+  await dbh.db
+    .update(schema.webhookEvents)
+    .set({ status: 'processing', attempts: row.attempts + 1 })
+    .where(eq(schema.webhookEvents.id, row.id));
+
+  try {
+    const endpoint = row.endpoint === 'sendblue-inbound' ? 'sendblue-inbound' : 'sendblue-status';
+    for (const event of normalizeSendblueWebhook(endpoint, row.parsed)) {
+      if (event.type === 'message.received' && event.data.from && event.data.to) {
+        const line = await resolveSendblueLine(dbh.db, config, event.data.to, event.data.from);
+        if (!line) {
+          await dbh.db.insert(schema.reconciliationMismatches).values({
+            objectType: 'orphan_provider_message',
+            provider: 'sendblue',
+            providerObjectId: event.providerObjectId,
+            field: 'message',
+            internalValue: null,
+            providerValue: `sendblue line ${maskPhone(event.data.to)} maps to no Talkr number`,
+          });
+          logger.warn({ webhookEventId: row.id }, 'inbound iMessage on an unmapped Sendblue line');
+          continue;
+        }
+        event.data.to = line.phoneE164;
+      }
+      const result = await applyMessageEvent(dbh, event, { webhookEventId: row.id, logger });
+      logger.info(
+        { webhookEventId: row.id, eventType: event.type, outcome: result.outcome, messageId: result.messageId },
+        'sendblue message event applied',
+      );
+    }
+    await dbh.db
+      .update(schema.webhookEvents)
+      .set({ status: 'processed', processedAt: new Date(), lastError: null })
+      .where(eq(schema.webhookEvents.id, row.id));
+  } catch (err) {
+    await dbh.db
+      .update(schema.webhookEvents)
+      .set({ status: 'failed', lastError: (err as Error).message })
+      .where(eq(schema.webhookEvents.id, row.id));
+    throw err;
+  }
 };
 
 // ---------------------------------------------------------------------------

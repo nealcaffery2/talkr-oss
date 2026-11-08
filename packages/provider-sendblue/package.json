@@ -1,0 +1,14 @@
+{
+  "name": "@talkr/provider-sendblue",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Sendblue adapter: iMessage send with SMS fallback, iMessage capability lookup, status/inbound webhook normalization. REST only, no SDK.",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@talkr/core": "*"
+  }
+}

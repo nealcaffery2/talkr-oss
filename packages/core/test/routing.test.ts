@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
+  DEFAULT_RING_TIMEOUT_SECONDS,
   LAST_CONTACT_DEFAULT_DAYS,
   decideInboundRoute,
+  overflowTarget,
+  ringTimeoutOf,
   isAvailable,
   pickLastContact,
   isWithinBusinessHours,
@@ -237,5 +240,37 @@ describe('last contact (docs/inbound-routing.md §10)', () => {
       }),
     );
     expect(d).toMatchObject({ action: 'ring_users', userIds: ['dana'], reason: 'last_contact' });
+  });
+});
+
+describe('ring window and no-answer overflow (docs/inbound-routing.md §11)', () => {
+  it('a number ring window clamps to 5-60 and nonsense is the default', () => {
+    expect(ringTimeoutOf(null)).toBe(DEFAULT_RING_TIMEOUT_SECONDS);
+    expect(ringTimeoutOf(undefined)).toBe(DEFAULT_RING_TIMEOUT_SECONDS);
+    expect(ringTimeoutOf(Number.NaN)).toBe(DEFAULT_RING_TIMEOUT_SECONDS);
+    expect(ringTimeoutOf(2)).toBe(5);
+    expect(ringTimeoutOf(90)).toBe(60);
+    expect(ringTimeoutOf(20.4)).toBe(20);
+  });
+
+  it('the number assignee rings for the number ring window', () => {
+    const d = decideInboundRoute({
+      now: NOW,
+      hours: {},
+      numberAssignedUserId: 'rep',
+      ringTimeoutSeconds: 15,
+      presence: presence({ rep: {} }),
+    });
+    expect(d).toMatchObject({ action: 'ring_users', userIds: ['rep'], timeoutSeconds: 15 });
+  });
+
+  it('overflow goes to the number overflow line once, never after hours, never twice', () => {
+    const number = { overflowToE164: '+12145559557' };
+    expect(overflowTarget(number, null, 'no_answer')).toBe('+12145559557');
+    expect(overflowTarget(number, {}, 'no_agents')).toBe('+12145559557');
+    expect(overflowTarget(number, { overflowTo: '+12145559557' }, 'no_answer')).toBeNull();
+    expect(overflowTarget(number, null, 'after_hours')).toBeNull();
+    expect(overflowTarget({ overflowToE164: ' ' }, null, 'no_answer')).toBeNull();
+    expect(overflowTarget({}, null, 'no_answer')).toBeNull();
   });
 });

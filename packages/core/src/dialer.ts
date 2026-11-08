@@ -24,10 +24,21 @@ export const CAMPAIGN_STATUSES: readonly CampaignStatus[] = ['draft', 'active', 
 
 /** FTC guidance: ≤3% of answered calls abandoned. Not configurable above. */
 export const ABANDONMENT_HARD_CAP_PERCENT = 3;
-/** Never more than 3 simultaneous PSTN lines per rep, whatever the config says. */
-export const PARALLEL_LINES_HARD_CAP = 3;
+/**
+ * Never more than 10 simultaneous PSTN lines per rep, whatever the config says.
+ * Ten is what Kixie and ReadyMode sell as their top tier; the abandonment cap
+ * (3%, below) is what actually throttles a rep, and CLOZR paces lines toward it.
+ */
+export const PARALLEL_LINES_HARD_CAP = 10;
 /** Rolling window for the abandonment rate (FTC measures per campaign / 30 days). */
 export const ABANDONMENT_WINDOW_DAYS = 30;
+/**
+ * Answered-or-abandoned calls the window needs before the cap is judged.
+ * Under this the rate is noise: one abandon in four answers read as 25% and
+ * pinned a rep to one line for the session (2026-10-29). CLOZR paces lines
+ * on the same floor (its dial-engine warmup).
+ */
+export const ABANDONMENT_MIN_SAMPLE = 20;
 
 export interface CampaignSettings {
   callerIdPhoneNumberId?: string;
@@ -44,6 +55,13 @@ export interface CampaignSettings {
   amdEnabled?: boolean;
   amdAction?: 'hangup' | 'voicemail_drop';
   amdVoicemailText?: string;
+  /**
+   * A recording to play instead of speaking amdVoicemailText: on a machine
+   * after the beep, and to a person who answers while the rep is already on
+   * another line. The rep's own voice, so a second answerer hears "sorry I
+   * missed you" from the person who called, not a robot.
+   */
+  amdVoicemailUrl?: string;
 }
 
 export interface ResolvedCampaignSettings {
@@ -59,6 +77,7 @@ export interface ResolvedCampaignSettings {
   amdEnabled: boolean;
   amdAction: 'hangup' | 'voicemail_drop';
   amdVoicemailText: string;
+  amdVoicemailUrl: string | null;
 }
 
 const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
@@ -70,7 +89,7 @@ function clampInt(value: unknown, fallback: number, min: number, max: number): n
 
 /**
  * Fill defaults and clamp every value. The compliance-critical clamps are the
- * point: parallelLines can never exceed 3 and abandonmentCapPercent can never
+ * point: parallelLines can never exceed 10 and abandonmentCapPercent can never
  * exceed the FTC 3% line, no matter what the stored jsonb says.
  */
 export function resolveCampaignSettings(raw: CampaignSettings | null | undefined): ResolvedCampaignSettings {
@@ -96,6 +115,8 @@ export function resolveCampaignSettings(raw: CampaignSettings | null | undefined
       typeof s.amdVoicemailText === 'string' && s.amdVoicemailText.trim().length > 0
         ? s.amdVoicemailText
         : 'Sorry we missed you. We will try to reach you again. Goodbye.',
+    amdVoicemailUrl:
+      typeof s.amdVoicemailUrl === 'string' && /^https:\/\//.test(s.amdVoicemailUrl) ? s.amdVoicemailUrl : null,
   };
 }
 
@@ -342,16 +363,16 @@ export function abandonmentRate(stats: AbandonmentStats): number {
 /**
  * The cap decision. Strictly-greater comparison against the cap percent:
  * with the default 3% cap, 1 abandon in 33 answered (3.03%) breaches; 3 in
- * 100 (3.00%) does not. With few samples this is aggressive by design — the
- * very first abandoned call breaches (1/1 = 100%) and drops the session to
- * one line. Compliance-first: recovery happens as the window rolls, not by
- * giving the benefit of the doubt. Pure and symmetric: when the windowed
+ * 100 (3.00%) does not. Not judged until the window holds
+ * ABANDONMENT_MIN_SAMPLE answered-or-abandoned calls: before that one
+ * abandon is a fluke, not a rate. Pure and symmetric: when the windowed
  * rate falls back under the cap this returns false again (recovery), though
  * an in-flight session's line reduction stays sticky (docs/dialers.md §10.6).
  */
 export function isAbandonmentCapBreached(stats: AbandonmentStats, capPercent: number): boolean {
   const cap = Math.min(capPercent, ABANDONMENT_HARD_CAP_PERCENT);
   if (stats.answered <= 0) return false;
+  if (stats.answered + stats.abandoned < ABANDONMENT_MIN_SAMPLE) return false;
   return abandonmentRate(stats) * 100 > cap;
 }
 
@@ -372,7 +393,7 @@ export function effectiveLineCount(
 /** Twilio AnsweredBy values that mean "not a human picked up". */
 export function isMachineAnsweredBy(answeredBy: string | null | undefined): boolean {
   if (!answeredBy) return false;
-  return answeredBy.startsWith('machine_') || answeredBy === 'fax';
+  return answeredBy === 'machine' || answeredBy.startsWith('machine_') || answeredBy === 'fax';
 }
 
 // ---------------------------------------------------------------------------
@@ -418,3 +439,57 @@ export const conservativePacer: PacingStrategy = (input) => {
   // Never predictively exceed the same hard per-rep line cap parallel obeys.
   return { linesToDial: Math.min(lines, input.availableReps * PARALLEL_LINES_HARD_CAP) };
 };
+
+// ---------------------------------------------------------------------------
+// Caller ID for a session line (docs/dialers.md §9).
+// The rep's own active voice lines are the pool: a local area code first,
+// then the line that has carried the fewest outbound calls lately. Pure so a
+// test can pin it; the server supplies the usage counts.
+// ---------------------------------------------------------------------------
+
+export interface CallerLine {
+  id: string;
+  phoneE164: string;
+  areaCode?: string | null;
+  assignedUserId?: string | null;
+  /** `capabilities.voice`; a text-only line never dials. */
+  voice?: boolean;
+}
+
+export interface PickCallerIdInput {
+  /** The rep placing the call: only their own lines rotate. */
+  userId: string;
+  /** E.164 destination; its area code is the local-presence key. */
+  toNumber: string | null | undefined;
+  /** Outbound calls per from-number over the rotation window (7 days). */
+  usage: ReadonlyMap<string, number>;
+}
+
+/**
+ * An AI agent's line: CLOZR labels them `AI · <name>` when it wires a number
+ * to ElevenLabs (agent-lines.ts defaultLabel). Voice on it rings the agent,
+ * so a rep must never dial or text from it: the callback lands on the agent.
+ */
+export function isAiLine(line: { label?: string | null }): boolean {
+  return /^AI\s*·/i.test((line.label ?? '').trim());
+}
+
+function nanpAreaCode(e164: string): string | null {
+  const m = /^\+1(\d{3})\d{7}$/.exec(e164.trim());
+  return m ? m[1]! : null;
+}
+
+/**
+ * The line to dial from, or null when the rep owns no voice line (the caller
+ * then falls back to the org default). Ties break on the number itself so the
+ * pick is stable for a test and a reviewer.
+ */
+export function pickRotatedCallerId(lines: readonly CallerLine[], input: PickCallerIdInput): CallerLine | null {
+  const pool = lines.filter((l) => l.assignedUserId === input.userId && l.voice !== false);
+  if (pool.length === 0) return null;
+  const dest = input.toNumber ? nanpAreaCode(input.toNumber) : null;
+  const local = dest ? pool.filter((l) => (l.areaCode ?? nanpAreaCode(l.phoneE164)) === dest) : [];
+  const from = local.length > 0 ? local : pool;
+  const used = (l: CallerLine) => input.usage.get(l.phoneE164) ?? 0;
+  return [...from].sort((a, b) => used(a) - used(b) || a.phoneE164.localeCompare(b.phoneE164))[0]!;
+}

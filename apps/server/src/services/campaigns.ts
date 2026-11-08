@@ -391,3 +391,56 @@ export async function campaignStats(dbh: DbHandle, ctx: AuthContext, campaignId:
     },
   };
 }
+
+/** One lead a session will ring soon, as the power dialer's "Up next" shows it. */
+export interface CampaignQueueLead {
+  campaign_lead_id: string;
+  lead_id: string;
+  name: string | null;
+  phone: string | null;
+  address: string | null;
+  city: string | null;
+  state: string | null;
+  attempts: number;
+  next_attempt_at: Date | null;
+  priority: number;
+}
+
+/**
+ * The next dialable leads of a campaign, in the order `next` will take them
+ * (docs/dialers.md §3: priority, then the earliest retry, then oldest). Only
+ * a preview: suppression, the per-day cap and the calling window are applied
+ * when a line is actually picked, so a row here can still be skipped then.
+ */
+export async function campaignQueue(dbh: DbHandle, ctx: AuthContext, campaignId: string, limit = 12): Promise<CampaignQueueLead[]> {
+  const campaign = await loadCampaign(dbh, ctx.orgId, campaignId);
+  if (!campaign) throw new CampaignServiceError('not_found', 'campaign not found');
+  const settings = resolveCampaignSettings(campaign.settings as CampaignSettings);
+  const rows = await dbh.db.execute(sql`
+    SELECT cl.id AS campaign_lead_id, cl.lead_id, cl.attempts, cl.next_attempt_at, cl.priority,
+      c.display_name AS name,
+      (SELECT cp.phone_e164 FROM contact_phones cp WHERE cp.contact_id = l.primary_contact_id AND cp.org_id = l.org_id ORDER BY cp.is_primary DESC LIMIT 1) AS phone,
+      p.address_line1 AS address, p.city, p.state
+    FROM campaign_leads cl
+    JOIN leads l ON l.id = cl.lead_id
+    LEFT JOIN contacts c ON c.id = l.primary_contact_id
+    LEFT JOIN properties p ON p.id = l.property_id
+    WHERE cl.campaign_id = ${campaign.id}
+      AND cl.status = 'pending'
+      AND (cl.next_attempt_at IS NULL OR cl.next_attempt_at <= now())
+      AND cl.attempts < ${settings.maxAttemptsTotal}
+    ORDER BY cl.priority DESC, cl.next_attempt_at ASC NULLS FIRST, cl.created_at ASC
+    LIMIT ${Math.min(50, Math.max(1, limit))}`);
+  return (rows.rows as Array<Record<string, unknown>>).map((r) => ({
+    campaign_lead_id: String(r.campaign_lead_id),
+    lead_id: String(r.lead_id),
+    name: (r.name as string | null) ?? null,
+    phone: (r.phone as string | null) ?? null,
+    address: (r.address as string | null) ?? null,
+    city: (r.city as string | null) ?? null,
+    state: (r.state as string | null) ?? null,
+    attempts: Number(r.attempts),
+    next_attempt_at: r.next_attempt_at ? new Date(r.next_attempt_at as string) : null,
+    priority: Number(r.priority),
+  }));
+}

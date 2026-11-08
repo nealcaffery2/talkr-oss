@@ -31,6 +31,10 @@ export const PUBLIC_WEBHOOK_EVENT_TYPES = [
   // Phase 7: emitted by the workflow engine's emit_webhook action (deliveries
   // are inserted directly by workflow-engine.ts; this sweep does not scan it).
   'workflow.executed',
+  // An iMessage or RCS read receipt (docs/messaging-channels.md). Deliveries
+  // are inserted by services/messages.ts in the transaction that records
+  // read_at; this sweep does not scan for it.
+  'message.read',
 ] as const;
 
 export type PublicWebhookEventType = (typeof PUBLIC_WEBHOOK_EVENT_TYPES)[number];

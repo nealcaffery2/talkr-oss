@@ -136,6 +136,32 @@ const configSchema = z.object({
   TELNYX_MESSAGING_PROFILE_ID: z.string().optional(),
   /** SIP domain reps' browsers are reachable at; Telnyx's shared one by default. */
   TELNYX_SIP_DOMAIN: z.string().default('sip.telnyx.com'),
+  /**
+   * RCS agent id (docs/rcs-setup.md). Unset = RCS off: every text goes SMS.
+   * Needs TELNYX_MESSAGING_PROFILE_ID as well, and a line with rcs_enabled.
+   */
+  TELNYX_RCS_AGENT_ID: z.preprocess((v) => (v === '' ? undefined : v), z.string().min(1).optional()),
+  /**
+   * Our number an inbound RCS message files under when no earlier thread with
+   * the sender says which line it belongs to (RCS arrives addressed to the
+   * agent, not a number). Optional; without it such a message is an orphan row.
+   */
+  TELNYX_RCS_INBOUND_NUMBER: z.preprocess((v) => (v === '' ? undefined : v), z.string().min(1).optional()),
+
+  // ── Sendblue / iMessage (docs/messaging-channels.md). All optional; unset = off.
+  /** API key id (header sb-api-key-id). iMessage is on only when both keys are set. */
+  SENDBLUE_API_KEY_ID: z.preprocess((v) => (v === '' ? undefined : v), z.string().min(1).optional()),
+  /** API secret (header sb-api-secret-key). */
+  SENDBLUE_API_SECRET: z.preprocess((v) => (v === '' ? undefined : v), z.string().min(1).optional()),
+  /** Default Sendblue line for Talkr numbers with iMessage on and no sendblue_from_number. */
+  SENDBLUE_FROM_NUMBER: z.preprocess((v) => (v === '' ? undefined : v), z.string().min(1).optional()),
+  /**
+   * The secret configured on the Sendblue webhooks; arrives in sb-signing-secret.
+   * Required for the inbound webhook to be accepted.
+   */
+  SENDBLUE_WEBHOOK_SECRET: z.preprocess((v) => (v === '' ? undefined : v), z.string().min(1).optional()),
+  /** API host override (a dedicated Sendblue instance, or tests). */
+  SENDBLUE_API_BASE: z.preprocess((v) => (v === '' ? undefined : v), z.string().url().optional()),
 
   /** Podio app auth (optional until the integration is wired). */
   PODIO_CLIENT_ID: z.string().optional(),

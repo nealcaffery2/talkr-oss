@@ -244,34 +244,61 @@ export async function bootstrapTelnyxIfNeeded(
     }
   }
 
-  if (
-    config.VOICE_PROVIDER === 'telnyx' &&
-    config.TELNYX_API_KEY &&
-    config.TELNYX_SIP_CONNECTION_ID
-  ) {
+  if (config.VOICE_PROVIDER !== 'telnyx' || !config.TELNYX_API_KEY) return config;
+
+  // The SIP preference and webhook URLs only need checking once per set of
+  // resource ids, not on every boot: on Vercel every cold start is a boot,
+  // and the three GETs from each one (2026-10-27: hundreds an hour across
+  // regions) spent the account's rate limit, so the dials and fetches that
+  // matter came back 429. A verified set is remembered in runtime_settings;
+  // a check that fails is retried on the next boot.
+  const fingerprint = [config.TELNYX_SIP_CONNECTION_ID, config.TELNYX_TEXML_APP_ID, config.TELNYX_MESSAGING_PROFILE_ID].map((v) => v ?? '').join('|');
+  if ((await wiringChecked(dbh)) === fingerprint) return config;
+
+  let verified = true;
+  if (config.TELNYX_SIP_CONNECTION_ID) {
     try {
       const api = new TelnyxApi(config.TELNYX_API_KEY, http);
       await api.reconcileBrowserSipUriPreference(config.TELNYX_SIP_CONNECTION_ID);
     } catch (err) {
+      verified = false;
       const message = err instanceof Error ? err.message : String(err);
       logger.warn({ err: message }, 'telnyx sip_uri_calling_preference reconcile failed; continuing');
     }
   }
 
   // Webhooks registered before the rename still point at /webhooks/twilio/.
-  // Move them; if Telnyx refuses, the old path keeps working regardless.
-  if (config.VOICE_PROVIDER === 'telnyx' && config.TELNYX_API_KEY) {
-    const api = new TelnyxApi(config.TELNYX_API_KEY, http);
-    const targets: Array<[string, string]> = [];
-    if (config.TELNYX_TEXML_APP_ID) targets.push([`/texml_applications/${config.TELNYX_TEXML_APP_ID}`, 'status_callback']);
-    if (config.TELNYX_MESSAGING_PROFILE_ID) targets.push([`/messaging_profiles/${config.TELNYX_MESSAGING_PROFILE_ID}`, 'webhook_url']);
-    for (const [path, field] of targets) {
-      try {
-        if (await api.repointWebhook(path, field)) logger.info({ path, field }, 'telnyx webhook moved to /webhooks/telnyx/');
-      } catch (err) {
-        logger.warn({ path, err: err instanceof Error ? err.message : String(err) }, 'telnyx webhook repoint failed; the legacy path still works');
-      }
+  // Move them; if Telnyx refuses, the old path keeps working regardless, so
+  // a refusal here does not keep the next boot asking again.
+  const api = new TelnyxApi(config.TELNYX_API_KEY, http);
+  const targets: Array<[string, string]> = [];
+  if (config.TELNYX_TEXML_APP_ID) targets.push([`/texml_applications/${config.TELNYX_TEXML_APP_ID}`, 'status_callback']);
+  if (config.TELNYX_MESSAGING_PROFILE_ID) targets.push([`/messaging_profiles/${config.TELNYX_MESSAGING_PROFILE_ID}`, 'webhook_url']);
+  for (const [path, field] of targets) {
+    try {
+      if (await api.repointWebhook(path, field)) logger.info({ path, field }, 'telnyx webhook moved to /webhooks/telnyx/');
+    } catch (err) {
+      logger.warn({ path, err: err instanceof Error ? err.message : String(err) }, 'telnyx webhook repoint failed; the legacy path still works');
     }
   }
+  if (verified) await upsert(dbh, { [WIRING_CHECKED_KEY]: fingerprint }, 'telnyx-bootstrap: SIP preference verified, webhook URLs checked').catch(() => undefined);
   return config;
+}
+
+/** runtime_settings row naming the resource ids whose wiring this code last verified. */
+export const WIRING_CHECKED_KEY = 'TELNYX_WIRING_CHECKED';
+
+async function wiringChecked(dbh: DbHandle): Promise<string | null> {
+  try {
+    const row = (
+      await dbh.db
+        .select({ value: schema.runtimeSettings.value })
+        .from(schema.runtimeSettings)
+        .where(sql`${schema.runtimeSettings.key} = ${WIRING_CHECKED_KEY}`)
+        .limit(1)
+    )[0];
+    return row?.value ?? null;
+  } catch {
+    return null;
+  }
 }

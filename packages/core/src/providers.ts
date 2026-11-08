@@ -4,7 +4,7 @@
  * depends on these shapes only — never on provider SDK types.
  */
 
-import type { CanonicalEvent, ProviderName } from './events.js';
+import type { CanonicalEvent, CanonicalMessageEvent, ProviderName } from './events.js';
 
 /** A webhook request as seen at the HTTP boundary, provider-agnostic. */
 export interface WebhookRequest {
@@ -90,6 +90,9 @@ export interface CreatePstnCallParams {
   /** Answering machine detection: 'enable' (report at answer) or
    * 'detect_message_end' (report after the greeting, for voicemail drops). */
   machineDetection?: 'enable' | 'detect_message_end';
+  /** How long the carrier may take to decide human vs machine before it reports
+   * what it has (`not_sure`) and runs the answer URL anyway. Carrier default 30s. */
+  machineDetectionTimeoutMs?: number;
   timeoutSeconds?: number;
 }
 
@@ -134,7 +137,7 @@ export interface AddParticipantParams {
   muted?: boolean;
   coaching?: boolean;
   callSidToCoach?: string;
-  /** False joins silently — a supervisor listening in must not announce themselves. */
+  /** Defaults to false: nobody's join or leave beeps into the room (the rep heard a beep when the seller answered). */
   beep?: boolean;
   /**
    * The platform call this leg joins, handed to a browser target the way an
@@ -142,6 +145,9 @@ export interface AddParticipantParams {
    * belongs to that call. Ignored for a PSTN target.
    */
   talkrCallId?: string;
+  /** Answering-machine detection on a PSTN leg; the verdict posts to `amdStatusCallbackUrl`. */
+  machineDetection?: 'enable' | 'detect_message_end';
+  amdStatusCallbackUrl?: string;
 }
 
 export interface ProviderParticipant {
@@ -251,6 +257,27 @@ export interface VoiceProvider {
    * carrier-less deployment has no media to serve.
    */
   fetchRecordingMedia?(ref: RecordingMediaRef): Promise<RecordingMedia>;
+
+  /**
+   * The recordings the carrier holds for one conference room, by the
+   * carrier's own conference id. For the sweep that recovers a recording
+   * whose webhook never arrived (worker/recording-sweep.ts). Optional: a
+   * carrier-less deployment has none.
+   */
+  listConferenceRecordings?(providerConferenceId: string): Promise<CarrierRecording[]>;
+}
+
+/** One recording as the carrier lists it, before it is a `recordings` row. */
+export interface CarrierRecording {
+  providerRecordingId: string;
+  status: 'completed' | 'processing' | 'failed';
+  durationSeconds: number | null;
+  channels: number | null;
+  /** A download link; for Telnyx a pre-signed one that expires, re-minted from the id when needed. */
+  providerUrl: string | null;
+  startedAt: Date | null;
+  endedAt: Date | null;
+  raw: Record<string, unknown>;
 }
 
 /** Audio container a recording can be served in. */
@@ -390,4 +417,29 @@ export interface MessagingProvider {
    * not a message event.
    */
   flattenMessageWebhook?(endpoint: string, body: unknown): Record<string, string> | null;
+  /**
+   * The carrier's own record of an outbound message, as the status event its
+   * receipt would have carried. For the sweep that finishes a text whose
+   * delivery receipt never arrived (worker/sms-status-sweep.ts). Null when the
+   * carrier has no such message.
+   */
+  fetchMessage?(providerMessageId: string): Promise<CanonicalMessageEvent | null>;
+  /**
+   * RCS Business Messaging (docs/rcs-setup.md). Present only when the carrier
+   * adapter has an RCS agent configured; callers check for it.
+   */
+  readonly rcsAgentId?: string | null;
+  /** Whether `to` can receive RCS from the configured agent. */
+  checkRcsCapability?(to: string): Promise<'supported' | 'unsupported' | 'unknown'>;
+  /**
+   * Send through the RCS agent. `smsFallbackFrom` is our line: the carrier
+   * delivers the text as SMS from it when the handset turns out not to take RCS.
+   */
+  sendRcsMessage?(params: {
+    to: string;
+    body: string;
+    mediaUrl?: string;
+    smsFallbackFrom?: string;
+    statusCallbackUrl?: string;
+  }): Promise<{ providerMessageId: string }>;
 }

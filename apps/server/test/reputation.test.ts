@@ -104,6 +104,26 @@ describe('SMS gate', () => {
     expect(res.json().message).toMatch(/daily cap of 1 texts/);
     await patchLine({ protection: { daily_sms_cap: null } });
   });
+
+  it('the daily text cap never stops a reply to someone who texted back', async () => {
+    const them = '+16145550706';
+    expect((await send(them)).statusCode).toBe(201);
+    await t.dbh.db.execute(sql`INSERT INTO messages (org_id, conversation_id, direction, status, body)
+      SELECT org_id, id, 'inbound', 'received', 'yes send them' FROM conversations WHERE org_id = ${t.seed.orgId} AND their_number = ${them}`);
+    await patchLine({ protection: { daily_sms_cap: 1 } });
+    expect((await send(them)).statusCode).toBe(201);
+    expect((await send('+16145550707')).statusCode).toBe(422);
+    await patchLine({ protection: { daily_sms_cap: null } });
+  });
+
+  it('the daily text cap never stops someone\'s default line', async () => {
+    await patchLine({ protection: { daily_sms_cap: 1 } });
+    await t.dbh.db.update(schema.users).set({ defaultPhoneNumberId: t.seed.phoneNumberId }).where(eq(schema.users.id, t.seed.repId));
+    const res = await send('+16145550705');
+    expect(res.statusCode).toBe(201);
+    await t.dbh.db.update(schema.users).set({ defaultPhoneNumberId: null }).where(eq(schema.users.id, t.seed.repId));
+    await patchLine({ protection: { daily_sms_cap: null } });
+  });
 });
 
 describe('reports', () => {

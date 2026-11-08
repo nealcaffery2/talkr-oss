@@ -4,6 +4,9 @@
  * Order, first match wins:
  *   1. a campaign-configured number (Phase 5 dial sessions);
  *   2. an explicit per-call override the rep picked in the dialer;
+ *   2b. a dial session with no pin rotates the rep's own voice lines: the
+ *       destination's area code first, then the line with the fewest
+ *       outbound calls in the last 7 days (core pickRotatedCallerId);
  *   3. local presence, when the rep has it on: an active org number whose
  *      area code matches the destination's, preferring the rep's own line;
  *   4. the rep's default number;
@@ -11,10 +14,14 @@
  *
  * Only active numbers the org owns are ever returned; an override that is not
  * one of them is ignored rather than trusted (the route validates it up
- * front and answers 400, so reaching that branch here means a race).
+ * front and answers 400, so reaching that branch here means a race). An AI
+ * agent's line (label `AI · ...`, core isAiLine) is never one of them, pinned
+ * or picked: voice on it rings the agent, so a lead calling back would reach
+ * the agent instead of the rep.
  */
 
-import { and, eq } from 'drizzle-orm';
+import { and, eq, gt, inArray, sql } from 'drizzle-orm';
+import { isAiLine, pickRotatedCallerId } from '@talkr/core';
 import { schema, type DbHandle, type DbTx } from '@talkr/db';
 import type { AuthContext } from '../auth.js';
 
@@ -34,7 +41,11 @@ export interface ChooseCallerIdOptions {
   campaignPhoneNumberId?: string | null;
   /** Caller's users row when the caller already loaded it. */
   user?: UserRow | null;
+  /** A dialer session line: spread the rep's own lines instead of one default. */
+  rotate?: boolean;
 }
+
+const ROTATION_WINDOW_DAYS = 7;
 
 /** NANP area code of an E.164 number, or null outside +1. */
 export function areaCodeOf(e164: string): string | null {
@@ -55,7 +66,7 @@ export async function chooseCallerId(
   ctx: AuthContext,
   opts: ChooseCallerIdOptions = {},
 ): Promise<PhoneNumberRow | undefined> {
-  const active = await listActiveNumbers(db, ctx.orgId);
+  const active = (await listActiveNumbers(db, ctx.orgId)).filter((n) => !isAiLine(n));
   if (active.length === 0) return undefined;
   const byId = new Map(active.map((n) => [n.id, n]));
 
@@ -64,6 +75,37 @@ export async function chooseCallerId(
   }
   if (opts.overridePhoneNumberId && byId.has(opts.overridePhoneNumberId)) {
     return byId.get(opts.overridePhoneNumberId);
+  }
+
+  if (opts.rotate) {
+    const mine = active.filter((n) => n.assignedUserId === ctx.userId);
+    if (mine.length > 0) {
+      const since = new Date(Date.now() - ROTATION_WINDOW_DAYS * 86_400_000);
+      const rows = await db
+        .select({ from: schema.calls.fromNumber, n: sql<number>`count(*)::int` })
+        .from(schema.calls)
+        .where(
+          and(
+            eq(schema.calls.orgId, ctx.orgId),
+            eq(schema.calls.direction, 'outbound'),
+            gt(schema.calls.createdAt, since),
+            inArray(schema.calls.fromNumber, mine.map((n) => n.phoneE164)),
+          ),
+        )
+        .groupBy(schema.calls.fromNumber);
+      const usage = new Map(rows.map((r) => [r.from, Number(r.n)]));
+      const pick = pickRotatedCallerId(
+        mine.map((n) => ({
+          id: n.id,
+          phoneE164: n.phoneE164,
+          areaCode: n.areaCode,
+          assignedUserId: n.assignedUserId,
+          voice: (n.capabilities as { voice?: boolean }).voice !== false,
+        })),
+        { userId: ctx.userId, toNumber: opts.toNumber, usage },
+      );
+      if (pick) return byId.get(pick.id);
+    }
   }
 
   const user =

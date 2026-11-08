@@ -12,6 +12,7 @@ import {
   firstWordOf,
   formatPhoneForSpeech,
   isMessageMergeField,
+  isUnreachableDestination,
   isWithinSmsSendWindow,
   normalizePhone,
   parseSmsKeyword,
@@ -30,6 +31,7 @@ import type { AuthContext } from '../auth.js';
 import type { Logger } from '../logger.js';
 import { writeAudit } from './audit.js';
 import { chooseCallerId } from './caller-id.js';
+import { loadLastTouches } from './last-contact.js';
 import { smsDecision } from './reputation.js';
 import { likeContains, searchDigits } from './contacts.js';
 import type { ConversationFilters, TimeBound } from './conversation-filters.js';
@@ -87,25 +89,6 @@ export async function findSmsSuppression(
 }
 
 // ---------------------------------------------------------------------------
-// Compliance auto-reply texts (docs/sms.md §4)
-// ---------------------------------------------------------------------------
-
-export const STOP_CONFIRMATION_BODY =
-  'You have been unsubscribed and will receive no further messages from this number. ' +
-  'Reply START to resubscribe. Msg&data rates may apply.';
-
-export const START_CONFIRMATION_BODY =
-  'You have been resubscribed to messages from this number. ' +
-  'Reply STOP to unsubscribe. Msg&data rates may apply.';
-
-export function helpBody(orgName: string): string {
-  return (
-    `${orgName}: You are receiving messages about your property inquiry. ` +
-    'Reply STOP to unsubscribe, START to resubscribe. Msg&data rates may apply.'
-  );
-}
-
-// ---------------------------------------------------------------------------
 // Outbound send path (POST /v1/messages — docs/sms.md §5)
 // ---------------------------------------------------------------------------
 
@@ -150,7 +133,9 @@ export async function sendMessage(dbh: DbHandle, ctx: AuthContext, input: SendMe
   if (suppressed) {
     throw new MessageServiceError(
       'suppressed',
-      'destination has opted out of SMS (suppression list); sending is blocked',
+      suppressed.reason === 'not_textable'
+        ? 'destination cannot receive texts (landline or invalid number, per the carrier); sending is blocked'
+        : 'destination has opted out of SMS (suppression list); sending is blocked',
     );
   }
 
@@ -250,6 +235,13 @@ export async function sendMessage(dbh: DbHandle, ctx: AuthContext, input: SendMe
         leadId,
         assignedUserId: ctx.userId,
       }));
+    // A thread nobody owns (a text to a shared or AI agent line from a
+    // number we had not reached) belongs to the first rep who answers it,
+    // so their replies land in their inbox from here on.
+    if (!convo.assignedUserId) {
+      await tx.update(schema.conversations).set({ assignedUserId: ctx.userId }).where(eq(schema.conversations.id, convo.id));
+      convo.assignedUserId = ctx.userId;
+    }
 
     const message = (
       await tx
@@ -676,6 +668,46 @@ export interface ApplyMessageResult {
   outcome: 'applied' | 'duplicate' | 'orphaned' | 'ignored';
   messageId?: string;
   conversationId?: string;
+  /** This event recorded the message's first read receipt. */
+  read?: boolean;
+}
+
+/**
+ * `message.read` to every active subscription that asked for it. Event id is
+ * per message, so a second read receipt (or a replay) never re-sends.
+ */
+async function fanOutMessageRead(tx: DbTx, message: MessageRow): Promise<void> {
+  const subs = await tx
+    .select()
+    .from(schema.webhookSubscriptions)
+    .where(and(eq(schema.webhookSubscriptions.orgId, message.orgId), eq(schema.webhookSubscriptions.active, true)));
+  const wanted = subs.filter((s) => Array.isArray(s.eventTypes) && (s.eventTypes as string[]).includes('message.read'));
+  if (wanted.length === 0) return;
+  const conversation = (
+    await tx.select().from(schema.conversations).where(eq(schema.conversations.id, message.conversationId)).limit(1)
+  )[0];
+  const readAt = message.readAt ?? new Date();
+  const eventId = `message.read:${message.id}`;
+  const envelope = {
+    id: eventId,
+    type: 'message.read',
+    occurredAt: readAt.toISOString(),
+    data: { ...serializeMessage(message, conversation ?? null), status: 'read', read_at: readAt.toISOString() },
+  };
+  for (const sub of wanted) {
+    const inserted = await tx
+      .insert(schema.webhookDeliveries)
+      .values({ orgId: message.orgId, subscriptionId: sub.id, eventId, eventType: 'message.read', payload: envelope })
+      .onConflictDoNothing()
+      .returning({ id: schema.webhookDeliveries.id });
+    const deliveryId = inserted[0]?.id;
+    if (!deliveryId) continue;
+    await enqueueJob(tx, {
+      jobType: 'webhook-deliver',
+      payload: { deliveryId },
+      dedupeKey: `webhook-deliver:${deliveryId}`,
+    });
+  }
 }
 
 export async function applyMessageEvent(
@@ -694,16 +726,21 @@ async function applyInboundMessage(
 ): Promise<ApplyMessageResult> {
   const { from, to } = event.data;
   const result = await dbh.db.transaction(async (tx): Promise<ApplyMessageResult> => {
-    if (!from || !to) return { outcome: 'ignored' };
+    if (!from) return { outcome: 'ignored' };
+    // An RCS message with no line to file under has `to` unset; it is an
+    // orphan like a text to a number we do not own, never silently dropped.
+    if (!to && event.data.channel !== 'rcs') return { outcome: 'ignored' };
 
     // Which org owns the destination number?
-    const number = (
-      await tx
-        .select()
-        .from(schema.phoneNumbers)
-        .where(eq(schema.phoneNumbers.phoneE164, to))
-        .limit(1)
-    )[0];
+    const number = to
+      ? (
+          await tx
+            .select()
+            .from(schema.phoneNumbers)
+            .where(eq(schema.phoneNumbers.phoneE164, to))
+            .limit(1)
+        )[0]
+      : undefined;
     if (!number) {
       // Never silently dropped: explicit orphan state.
       await tx.insert(schema.reconciliationMismatches).values({
@@ -719,14 +756,22 @@ async function applyInboundMessage(
 
     const { contact, lead } = await lookupContactLead(tx, number.orgId, from);
 
+    // Whose inbox: the lead owner, else the line's rep, else (a shared or AI
+    // agent line) the rep who last called or texted this number
+    // (last-contact.ts), so a reply to a rep's outreach reaches that rep.
+    const owner =
+      lead?.assignedUserId ??
+      number.assignedUserId ??
+      (await loadLastTouches(tx, number.orgId, from))[0]?.userId ??
+      null;
     const conversation = await upsertConversation(tx, {
       orgId: number.orgId,
-      ourNumber: to,
+      ourNumber: number.phoneE164,
       theirNumber: from,
       phoneNumberId: number.id,
       contactId: contact?.id ?? null,
       leadId: lead?.id ?? null,
-      assignedUserId: lead?.assignedUserId ?? number.assignedUserId ?? null,
+      assignedUserId: owner,
     });
 
     // Idempotency gate: provider_message_sid unique. A duplicate delivery
@@ -743,6 +788,7 @@ async function applyInboundMessage(
         numSegments: event.data.numSegments ?? null,
         provider: event.provider,
         providerMessageSid: event.providerObjectId,
+        channel: event.data.channel ?? 'sms',
       })
       .onConflictDoNothing({ target: schema.messages.providerMessageSid })
       .returning();
@@ -757,6 +803,8 @@ async function applyInboundMessage(
         unreadCount: sql`${schema.conversations.unreadCount} + 1`,
         contactId: conversation.contactId ?? contact?.id ?? null,
         leadId: conversation.leadId ?? lead?.id ?? null,
+        // An existing thread nobody owned yet takes the owner found above.
+        assignedUserId: conversation.assignedUserId ?? owner,
       })
       .where(eq(schema.conversations.id, conversation.id));
 
@@ -783,16 +831,12 @@ async function applyInboundMessage(
         objectId: message.id,
         metadata: { phone_last4: from.slice(-4) },
       });
-      await queueAutoReply(tx, conversation, STOP_CONFIRMATION_BODY);
-    } else if (keyword === 'help') {
-      const org = (
-        await tx
-          .select()
-          .from(schema.organizations)
-          .where(eq(schema.organizations.id, number.orgId))
-          .limit(1)
-      )[0]!;
-      await queueAutoReply(tx, conversation, helpBody(org.name));
+      // No text back from us for STOP, HELP or START. Telnyx answers STOP
+      // itself and blocks the number (our own confirmation came back 409 on
+      // every try: 573 dead send-message jobs by 2026-10-27), and a
+      // boilerplate HELP or START reply reads as spam in a thread that is
+      // otherwise a person talking. The rep sees the keyword in the inbox
+      // and answers like a person. The records above are what matter.
     } else if (keyword === 'start') {
       // START reverses SMS keyword opt-outs only; DNC/complaint/legal
       // suppressions (channel 'all' or other reasons) remain in force.
@@ -815,7 +859,6 @@ async function applyInboundMessage(
         objectId: message.id,
         metadata: { phone_last4: from.slice(-4) },
       });
-      await queueAutoReply(tx, conversation, START_CONFIRMATION_BODY);
     }
 
     // Exactly one Podio activity per inbound message on a CRM-linked lead.
@@ -851,34 +894,6 @@ async function applyInboundMessage(
   return result;
 }
 
-/**
- * Compliance auto-reply: goes through the same send path (queued row +
- * send-message job) but flagged is_auto_reply so the send job bypasses the
- * suppression and quiet-hours gates — it responds to a message the recipient
- * just sent us (docs/sms.md §4). Created in the same transaction as the
- * inbound apply, which is SID-gated, so it is exactly-once.
- */
-async function queueAutoReply(tx: DbTx, conversation: ConversationRow, body: string): Promise<void> {
-  const reply = (
-    await tx
-      .insert(schema.messages)
-      .values({
-        orgId: conversation.orgId,
-        conversationId: conversation.id,
-        direction: 'outbound',
-        status: 'queued',
-        body,
-        isAutoReply: true,
-      })
-      .returning()
-  )[0]!;
-  await enqueueJob(tx, {
-    jobType: 'send-message',
-    payload: { messageId: reply.id },
-    dedupeKey: `send-message:${reply.id}`,
-  });
-}
-
 async function applyMessageStatus(
   dbh: DbHandle,
   event: CanonicalMessageEvent,
@@ -904,17 +919,23 @@ async function applyMessageStatus(
       sentAt: message.sentAt,
       deliveredAt: message.deliveredAt,
       failedAt: message.failedAt,
+      readAt: message.readAt,
       errorCode: message.errorCode,
       failureClass: message.failureClass as MessageFailureClass,
     };
+    // A provider that downgraded the send (Sendblue to SMS, RCS to its SMS
+    // fallback) says so on the receipt; the row follows what actually went.
+    const channelChanged = Boolean(event.data.channel && event.data.channel !== message.channel);
     const change = reduceMessageStatus(snapshot, {
       status: (event.data.status ?? 'queued') as MessageStatus,
       errorCode: event.data.errorCode,
       occurredAt: event.occurredAt,
     });
-    if (change.noop) return { outcome: 'duplicate', messageId: message.id };
+    if (change.noop && !channelChanged) return { outcome: 'duplicate', messageId: message.id };
 
     const update: Partial<typeof schema.messages.$inferInsert> = {};
+    if (channelChanged) update.channel = event.data.channel!;
+    if (change.readAt) update.readAt = change.readAt;
     if (change.status) update.status = change.status;
     if (change.sentAt) update.sentAt = change.sentAt;
     if (change.deliveredAt) update.deliveredAt = change.deliveredAt;
@@ -925,10 +946,42 @@ async function applyMessageStatus(
       update.numSegments = event.data.numSegments;
     }
     await tx.update(schema.messages).set(update).where(eq(schema.messages.id, message.id));
+    // Self-heal: the carrier says this number can never take a text, so it
+    // is suppressed for SMS now and the next send is refused before it
+    // reaches the carrier. START does not lift it (that clears 'stop' only).
+    if (change.failedAt && isUnreachableDestination(change.errorCode ?? event.data.errorCode)) {
+      const convo = (
+        await tx
+          .select({ theirNumber: schema.conversations.theirNumber })
+          .from(schema.conversations)
+          .where(eq(schema.conversations.id, message.conversationId))
+          .limit(1)
+      )[0];
+      if (convo?.theirNumber) {
+        await tx
+          .insert(schema.suppressionRecords)
+          .values({
+            orgId: message.orgId,
+            phoneE164: convo.theirNumber,
+            scope: 'org',
+            channel: 'sms',
+            reason: 'not_textable',
+            source: `message:${message.id}`,
+            note: `carrier error ${change.errorCode ?? event.data.errorCode}`,
+          })
+          .onConflictDoNothing();
+      }
+    }
+    // The first read receipt is a public `message.read` webhook too, written
+    // in this transaction so it goes out exactly once (docs/public-api.md §7).
+    if (change.readAt) {
+      await fanOutMessageRead(tx, { ...message, ...update } as MessageRow);
+    }
     return {
       outcome: 'applied',
       messageId: message.id,
       conversationId: message.conversationId,
+      read: Boolean(change.readAt),
     };
   });
 
@@ -937,12 +990,26 @@ async function applyMessageStatus(
       await dbh.db.select().from(schema.messages).where(eq(schema.messages.id, result.messageId)).limit(1)
     )[0];
     if (fresh) {
+      const data = {
+        conversationId: fresh.conversationId,
+        messageId: fresh.id,
+        channel: fresh.channel,
+        ...(fresh.readAt ? { readAt: fresh.readAt.toISOString() } : {}),
+      };
       await publishBusEvent(dbh.pool, {
         type: 'message.updated',
         orgId: fresh.orgId,
         status: fresh.status,
-        data: { conversationId: fresh.conversationId, messageId: fresh.id },
+        data,
       }).catch((err) => ctx.logger.warn({ err }, 'bus publish failed'));
+      if (result.read) {
+        await publishBusEvent(dbh.pool, {
+          type: 'message.read',
+          orgId: fresh.orgId,
+          status: 'read',
+          data,
+        }).catch((err) => ctx.logger.warn({ err }, 'bus publish failed'));
+      }
     }
   }
   return result;
@@ -1319,6 +1386,12 @@ export function serializeMessage(m: MessageRow, conv?: { ourNumber: string; thei
     sent_at: m.sentAt,
     delivered_at: m.deliveredAt,
     failed_at: m.failedAt,
+    /** First read receipt (iMessage, RCS); always null for SMS. */
+    read_at: m.readAt,
+    /** sms | imessage | rcs: how it actually travelled. */
+    channel: m.channel,
+    /** telnyx | sendblue. */
+    provider: m.provider,
     created_at: m.createdAt,
   };
 }

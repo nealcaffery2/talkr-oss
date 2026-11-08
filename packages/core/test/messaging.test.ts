@@ -10,6 +10,7 @@ import {
   emptyMessageMergeVars,
   findMessageMergeFields,
   isMessageMergeField,
+  isUnreachableDestination,
   isWithinSmsSendWindow,
   MESSAGE_MERGE_FIELDS,
   parseSmsKeyword,
@@ -99,6 +100,11 @@ describe('message state machine', () => {
     expect(classifyMessageFailure('30005')).toBe('carrier_failure');
     expect(classifyMessageFailure('junk')).toBe('carrier_failure');
     expect(classifyMessageFailure(undefined)).toBe('carrier_failure');
+  });
+
+  it('flags numbers that can never take a text, not spam blocks', () => {
+    for (const code of ['40001', '40012', '30005', '30006', '21614', ' 40001 ']) expect(isUnreachableDestination(code)).toBe(true);
+    for (const code of ['40002', '40003', '30007', 'send_dead_letter', '', null, undefined]) expect(isUnreachableDestination(code)).toBe(false);
   });
 });
 

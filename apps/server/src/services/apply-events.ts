@@ -281,15 +281,23 @@ async function applyCallEvent(
         drives = call.direction === 'outbound';
       } else if (isTerminalEvent(event)) {
         // Terminal from a browser leg only decides the call when no PSTN leg
-        // ever existed (canceled/failed before any dial happened).
-        const pstnLeg = (
-          await tx
-            .select()
-            .from(schema.callLegs)
-            .where(and(eq(schema.callLegs.callId, call.id), eq(schema.callLegs.legRole, 'pstn')))
-            .limit(1)
-        )[0];
-        drives = !pstnLeg;
+        // ever existed (canceled/failed before any dial happened). On inbound
+        // the caller's own leg is the truth leg, so a rep's browser answering
+        // 486 while the other reps still ring never ends the call: on
+        // 2026-10-27 20:54 one busy fork marked a ring-all call busy and
+        // ended a second before David answered it.
+        if (call.direction === 'inbound') {
+          drives = false;
+        } else {
+          const pstnLeg = (
+            await tx
+              .select()
+              .from(schema.callLegs)
+              .where(and(eq(schema.callLegs.callId, call.id), eq(schema.callLegs.legRole, 'pstn')))
+              .limit(1)
+          )[0];
+          drives = !pstnLeg;
+        }
       } else {
         drives = false;
       }

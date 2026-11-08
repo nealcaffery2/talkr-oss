@@ -207,6 +207,7 @@ export async function resolveInboundContext(
     teamMemberUserIds: teamMemberIds,
     queue,
     forwardToE164: number.forwardToE164 ?? null,
+    ringTimeoutSeconds: number.ringTimeoutSeconds ?? null,
     presence,
   });
 

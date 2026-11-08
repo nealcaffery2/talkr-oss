@@ -168,11 +168,39 @@ export interface RouteInput {
   /** Queue the number feeds, with members resolved. */
   queue?: QueueConfig | null;
   forwardToE164?: string | null;
+  /** How long a ring step waits; the number's ring_timeout_seconds, else DEFAULT_RING_TIMEOUT_SECONDS. */
+  ringTimeoutSeconds?: number | null;
   presence: Map<string, PresenceInfo>;
 }
 
 export const SIMULTANEOUS_RING_CAP = 5;
 export const DEFAULT_RING_TIMEOUT_SECONDS = 25;
+export const MIN_RING_TIMEOUT_SECONDS = 5;
+export const MAX_RING_TIMEOUT_SECONDS = 60;
+
+/** A number's ring window, clamped; null or nonsense is the default. */
+export function ringTimeoutOf(seconds: number | null | undefined): number {
+  if (typeof seconds !== 'number' || !Number.isFinite(seconds)) return DEFAULT_RING_TIMEOUT_SECONDS;
+  return Math.min(MAX_RING_TIMEOUT_SECONDS, Math.max(MIN_RING_TIMEOUT_SECONDS, Math.round(seconds)));
+}
+
+/**
+ * Where an unanswered call goes before voicemail: the number's overflow line
+ * (an AI agent covering the rep, docs/inbound-routing.md §11), once per call.
+ * `raw.overflowTo` marks a call that already overflowed, so the overflow leg's
+ * own no-answer falls to voicemail and never loops. After-hours calls keep
+ * their voicemail: the org closed on purpose.
+ */
+export function overflowTarget(
+  number: { overflowToE164?: string | null },
+  raw: { overflowTo?: unknown } | null | undefined,
+  reason: 'no_answer' | 'no_agents' | 'after_hours' | string,
+): string | null {
+  const to = (number.overflowToE164 ?? '').trim();
+  if (!to || reason === 'after_hours') return null;
+  if (raw && raw.overflowTo) return null;
+  return to;
+}
 
 export type RoutingDecision =
   | {
@@ -228,6 +256,7 @@ function timeOrEpoch(d: Date | null | undefined): number {
 
 export function decideInboundRoute(input: RouteInput): RoutingDecision {
   const { now, presence } = input;
+  const ringTimeout = ringTimeoutOf(input.ringTimeoutSeconds);
 
   if (!isWithinBusinessHours(input.hours, now)) {
     return { action: 'voicemail', reason: 'after_hours' };
@@ -248,7 +277,7 @@ export function decideInboundRoute(input: RouteInput): RoutingDecision {
       return {
         action: 'ring_users',
         userIds: [touch.userId],
-        timeoutSeconds: DEFAULT_RING_TIMEOUT_SECONDS,
+        timeoutSeconds: ringTimeout,
         reason: 'last_contact',
         lastContact: lastContactDto(touch),
       };
@@ -260,7 +289,7 @@ export function decideInboundRoute(input: RouteInput): RoutingDecision {
     return {
       action: 'ring_users',
       userIds: [input.leadOwnerUserId],
-      timeoutSeconds: DEFAULT_RING_TIMEOUT_SECONDS,
+      timeoutSeconds: ringTimeout,
       reason: 'lead_owner',
     };
   }
@@ -277,7 +306,7 @@ export function decideInboundRoute(input: RouteInput): RoutingDecision {
     return {
       action: 'ring_users',
       userIds: [input.numberAssignedUserId],
-      timeoutSeconds: DEFAULT_RING_TIMEOUT_SECONDS,
+      timeoutSeconds: ringTimeout,
       reason: 'number_assignee',
     };
   }
@@ -289,7 +318,7 @@ export function decideInboundRoute(input: RouteInput): RoutingDecision {
     return {
       action: 'ring_users',
       userIds: availableTeam,
-      timeoutSeconds: DEFAULT_RING_TIMEOUT_SECONDS,
+      timeoutSeconds: ringTimeout,
       reason: 'team',
     };
   }

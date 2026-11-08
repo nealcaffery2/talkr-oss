@@ -275,6 +275,13 @@ export interface CustomerDialTarget {
   toNumber: string;
   /** `PUBLIC_BASE_URL`, without a trailing slash. */
   publicBaseUrl: string;
+  /** A dialer session's call (calls.raw.amd): detect a machine, verdict to /webhooks/telnyx/amd-status. */
+  amd?: boolean;
+}
+
+/** Whether a call asked for machine detection on its seller leg. Hand-dialed calls never do. */
+export function wantsAmd(raw: unknown): boolean {
+  return !!raw && typeof raw === 'object' && (raw as Record<string, unknown>).amd === true;
 }
 
 /**
@@ -297,5 +304,12 @@ export function customerParticipantParams(target: CustomerDialTarget): AddPartic
     to: target.toNumber,
     statusCallbackUrl: `${target.publicBaseUrl}/webhooks/telnyx/voice-status?call=${target.callId}&leg=pstn`,
     endConferenceOnExit: true,
+    // DetectMessageEnd: the verdict lands at the beep, so a drop starts after the greeting.
+    ...(target.amd
+      ? {
+          machineDetection: 'detect_message_end' as const,
+          amdStatusCallbackUrl: `${target.publicBaseUrl}/webhooks/telnyx/amd-status?call=${target.callId}`,
+        }
+      : {}),
   };
 }

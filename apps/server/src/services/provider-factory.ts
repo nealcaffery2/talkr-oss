@@ -62,6 +62,7 @@ export function createProvider(
       texmlApplicationId: config.TELNYX_TEXML_APP_ID!,
       sipConnectionId: config.TELNYX_SIP_CONNECTION_ID!,
       messagingProfileId: config.TELNYX_MESSAGING_PROFILE_ID,
+      rcsAgentId: config.TELNYX_RCS_AGENT_ID,
       sipDomain: config.TELNYX_SIP_DOMAIN,
     },
     dbh

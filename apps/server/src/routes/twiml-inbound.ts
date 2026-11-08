@@ -24,6 +24,7 @@ import {
   type FlowPathEntry,
   type IvrConfig,
   type QueueConfig,
+  overflowTarget,
 } from '@talkr/core';
 import { enqueueJob, publishBusEvent, schema } from '@talkr/db';
 import type { TelnyxVoiceProvider } from '@talkr/provider-telnyx';
@@ -38,6 +39,7 @@ import {
   voicemailGreetingFor,
 } from '../services/inbound-routing.js';
 import { loadFlowFacts, voicemailGreeting } from '../services/call-flows.js';
+import { OVERFLOW_DIAL_TIMEOUT_SECONDS, buildOverflowNotice, loadOverflowRep, notifyOverflow } from '../services/overflow.js';
 
 const QUEUE_WAIT_PAUSE_SECONDS = 10;
 const QUEUE_MAX_CYCLES = 60; // hard backstop over max_wait_seconds
@@ -78,6 +80,39 @@ export function registerInboundTwimlRoutes(app: FastifyInstance, deps: AppDeps):
     await dbh.db.execute(sql`
       UPDATE calls SET raw = raw || jsonb_build_object('voicemailOffered', true, 'voicemailReason', ${reason}::text)
       WHERE id = ${callId}`);
+  }
+
+  /**
+   * An unanswered call's last stop before voicemail (§11): the number's
+   * overflow line, an AI agent covering the rep. The subscriber behind it is
+   * told first, so its agent knows whose call this is. False when the call
+   * goes to voicemail instead (no overflow line, already overflowed, after hours).
+   */
+  async function renderNoAnswerOverflow(reply: FastifyReply, call: CallRow, number: NumberRow, reason: string): Promise<boolean> {
+    const to = overflowTarget(number, call.raw as { overflowTo?: unknown } | null, reason);
+    if (!to) return false;
+    await dbh.db.execute(sql`
+      UPDATE calls SET raw = raw || jsonb_build_object('overflowTo', ${to}::text, 'overflowReason', ${reason}::text)
+      WHERE id = ${call.id}`);
+    const notice = buildOverflowNotice(call, to, reason, await loadOverflowRep(dbh.db, call));
+    await journal(call, 'call.overflow', `${call.providerCallId}:overflow`, notice.data);
+    await notifyOverflow({ db: dbh.db, logger: app.log }, call.orgId, notice);
+    const q = `call=${call.id}`;
+    sendTwiml(
+      reply,
+      provider.buildForwardDialResponse({
+        // The caller's number, so the agent's own lookup finds them.
+        callerId: call.fromNumber,
+        to,
+        timeoutSeconds: OVERFLOW_DIAL_TIMEOUT_SECONDS,
+        dialActionUrl: `${config.PUBLIC_BASE_URL}/twiml/inbound-dial-complete?${q}`,
+        statusCallbackUrl: `${config.PUBLIC_BASE_URL}/webhooks/telnyx/voice-status?${q}&leg=pstn`,
+        record: true,
+        recordingStatusCallbackUrl: `${config.PUBLIC_BASE_URL}/webhooks/telnyx/recording-status?${q}`,
+      }),
+    );
+    logger.info({ callId: call.id, reason, to: maskPhone(to) }, 'inbound call overflowed to the AI line');
+    return true;
   }
 
   async function journal(call: CallRow, eventType: string, dedupe: string, payload: unknown) {
@@ -527,7 +562,7 @@ export function registerInboundTwimlRoutes(app: FastifyInstance, deps: AppDeps):
           recordingStatusCallbackUrl: `${config.PUBLIC_BASE_URL}/webhooks/telnyx/recording-status?${q}`,
         }),
       );
-    } else {
+    } else if (!(await renderNoAnswerOverflow(reply, call, context.number, decision.reason))) {
       await markVoicemailOffered(call.id, decision.reason);
       sendTwiml(reply, voicemailTwiml(call.id, voicemailGreetingFor(context.org)));
     }
@@ -719,6 +754,11 @@ export function registerInboundTwimlRoutes(app: FastifyInstance, deps: AppDeps):
       sendTwiml(reply, provider.buildHangupResponse());
       return reply;
     }
+    // The rep did not pick up: the number's overflow line gets the caller before voicemail does.
+    const number = call.phoneNumberId
+      ? (await dbh.db.select().from(schema.phoneNumbers).where(eq(schema.phoneNumbers.id, call.phoneNumberId)).limit(1))[0]
+      : undefined;
+    if (number && (await renderNoAnswerOverflow(reply, call, number, 'no_answer'))) return reply;
     const org = (
       await dbh.db
         .select()

@@ -18,6 +18,7 @@ const OUR_NUMBER = '+15005550006';
 const DEST = '+16145550888'; // plain destination, no CRM links
 const DEST_SUPPRESS = '+16145550889';
 const DEST_DLQ = '+16145550890';
+const DEST_LANDLINE = '+16145550892';
 
 const ALWAYS_OPEN = { timezone: 'UTC', smsSendWindowStart: '00:00', smsSendWindowEnd: '00:00' };
 
@@ -154,14 +155,38 @@ describe('status callback lifecycle', () => {
     await webhookPost(
       ctx,
       '/webhooks/telnyx/sms-status',
-      smsStatus({ sid, status: 'failed', errorCode: '30005', to: DEST }),
+      smsStatus({ sid, status: 'failed', errorCode: '30007', to: DEST }),
     );
     await ctx.runner.drain();
     const row = await messageBySid(sid);
     expect(row.status).toBe('failed');
-    expect(row.errorCode).toBe('30005');
+    expect(row.errorCode).toBe('30007');
     expect(row.failureClass).toBe('carrier_failure');
     expect(row.failedAt).not.toBeNull();
+    // A spam block is about the message, so the number stays textable.
+    expect((await send({ to_number: DEST, body: 'still allowed' })).statusCode).toBe(201);
+    await ctx.runner.drain();
+  });
+
+  it('a landline (Telnyx 40001) is suppressed, and the next text is refused before the carrier', async () => {
+    const res = await send({ to_number: DEST_LANDLINE, body: 'to a landline' });
+    await ctx.runner.drain();
+    const sid = (await messageById((res.json() as { message: { id: string } }).message.id)).providerMessageSid!;
+    await webhookPost(ctx, '/webhooks/telnyx/sms-status', smsStatus({ sid, status: 'failed', errorCode: '40001', to: DEST_LANDLINE }));
+    await ctx.runner.drain();
+
+    const supp = await ctx.dbh.db.select().from(schema.suppressionRecords)
+      .where(and(eq(schema.suppressionRecords.orgId, ctx.seed.orgId), eq(schema.suppressionRecords.phoneE164, DEST_LANDLINE)));
+    expect(supp).toHaveLength(1);
+    expect(supp[0]!.reason).toBe('not_textable');
+    expect(supp[0]!.channel).toBe('sms');
+
+    const sentBefore = ctx.sentMessages.length;
+    const again = await send({ to_number: DEST_LANDLINE, body: 'second try' });
+    expect(again.statusCode).toBe(422);
+    expect((again.json() as { message: string }).message).toMatch(/cannot receive texts/);
+    await ctx.runner.drain();
+    expect(ctx.sentMessages.length).toBe(sentBefore);
   });
 
   it('undelivered with a 21xxx code classifies platform_failure', async () => {

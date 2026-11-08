@@ -5,7 +5,7 @@
  */
 
 /** `none` is a deployment with no carrier yet (VOICE_PROVIDER=none): boots, cannot call. */
-export type ProviderName = 'telnyx' | 'podio' | 'test' | 'none';
+export type ProviderName = 'telnyx' | 'sendblue' | 'podio' | 'test' | 'none';
 
 export const CANONICAL_EVENT_TYPES = [
   'call.initiated',
@@ -103,6 +103,14 @@ export interface CanonicalMessageEvent extends CanonicalEventBase {
     mediaUrls?: string[];
     /** Provider-reported segment count. (Phase 4) */
     numSegments?: number;
+    /**
+     * How the message travelled, when the provider says: Sendblue reports
+     * iMessage vs a downgrade to SMS, Telnyx v2 events carry `type: RCS`.
+     * Absent means SMS, as every message was before these channels existed.
+     */
+    channel?: 'sms' | 'imessage' | 'rcs';
+    /** Provider-side identifier of the receiving RCS agent (inbound RCS only). */
+    rcsAgentId?: string;
   };
 }
 

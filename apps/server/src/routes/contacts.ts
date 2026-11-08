@@ -24,6 +24,7 @@ import type { AppDeps } from '../app.js';
 import { hasPermission, type AuthContext } from '../auth.js';
 import { writeAudit } from '../services/audit.js';
 import { CampaignServiceError, attachLeads, createCampaign, updateCampaign } from '../services/campaigns.js';
+import { settingsSchema } from './campaigns.js';
 import {
   IMPORT_MAPPING_KEYS,
   firstNameOf,
@@ -145,7 +146,40 @@ const bulkMessageSchema = z.object({
 const dialListSchema = z.object({
   ids: z.array(z.string().uuid()).min(1).max(500),
   name: z.string().trim().min(1).max(200).optional(),
+  // A partner app (CLOZR) builds a parallel list for a rep who lacks
+  // campaigns.manage: the mode and settings ride on the create, clamped by
+  // resolveCampaignSettings like any other campaign.
+  mode: z.enum(['power', 'parallel']).default('power'),
+  settings: settingsSchema.optional(),
 });
+
+/** A partner CRM's people, keyed by its own id, so a re-push never duplicates. */
+const upsertSchema = z.object({
+  source: z.string().trim().min(1).max(80).default('clozr'),
+  contacts: z
+    .array(
+      z.object({
+        external_id: z.string().trim().min(1).max(120),
+        name: z.string().trim().max(200).default(''),
+        phones: z.array(z.string().max(40)).min(1).max(10),
+        /** IANA zone; lands on the lead so the calling window is the seller's. */
+        timezone: z.string().trim().max(64).optional(),
+        tags: z.array(z.string().trim().min(1).max(60)).max(50).optional(),
+      }),
+    )
+    .min(1)
+    .max(500),
+});
+
+function validZone(zone: string | undefined): string | null {
+  if (!zone) return null;
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: zone });
+    return zone;
+  } catch {
+    return null;
+  }
+}
 
 const mappingSchema = z.object(
   Object.fromEntries(IMPORT_MAPPING_KEYS.map((k) => [k, z.string().min(1).max(200).optional()])) as Record<
@@ -854,6 +888,92 @@ export function registerContactRoutes(app: FastifyInstance, deps: AppDeps): void
   // Dial list — a power-mode campaign owned by the caller (docs/dialers.md §4):
   // the rep presses Next, one lead at a time, nothing auto-dials.
   // -------------------------------------------------------------------------
+  // Upsert by the partner's id, then by phone; ids come back in request order
+  // so the caller can hand them straight to /v1/contacts/bulk/dial-list.
+  app.post('/v1/contacts/upsert', write, async (req, reply) => {
+    const ctx = req.authCtx!;
+    const parsed = upsertSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'invalid_body', issues: parsed.error.issues });
+    }
+    const { source, contacts: rows } = parsed.data;
+    const results: Array<{ external_id: string; contact_id: string | null; status: 'created' | 'merged' | 'skipped'; reason?: string }> = [];
+    const createdIds: string[] = [];
+    for (const batch of chunk(rows, 100)) {
+      const normalized = batch.map((row) => ({ row, phones: normalizePhoneList(row.phones.map((phone) => ({ phone }))) }));
+      const phones = [...new Set(normalized.flatMap((n) => (n.phones.ok ? n.phones.phones.map((p) => p.phoneE164) : [])))];
+      const owners = await findPhoneOwners(db, ctx.orgId, phones);
+      const byExternal = new Map(
+        (
+          await db
+            .select({ id: schema.contacts.id, ext: sql<string>`${schema.contacts.raw}->>'externalId'` })
+            .from(schema.contacts)
+            .where(
+              and(
+                eq(schema.contacts.orgId, ctx.orgId),
+                isNull(schema.contacts.deletedAt),
+                eq(schema.contacts.source, source),
+                inArray(sql`${schema.contacts.raw}->>'externalId'`, batch.map((r) => r.external_id)),
+              ),
+            )
+        ).map((r) => [r.ext, r.id]),
+      );
+      await db.transaction(async (tx) => {
+        for (const { row, phones: list } of normalized) {
+          if (!list.ok || list.phones.length === 0) {
+            results.push({ external_id: row.external_id, contact_id: null, status: 'skipped', reason: 'invalid_phone' });
+            continue;
+          }
+          const existingId =
+            byExternal.get(row.external_id) ?? list.phones.map((p) => owners.get(p.phoneE164)).find(Boolean) ?? null;
+          let id: string;
+          if (existingId) {
+            await mergeIntoContact(tx, ctx.orgId, existingId, { source, tags: row.tags ?? [], phones: list.phones });
+            id = existingId;
+          } else {
+            const created = await insertContact(tx, ctx.orgId, {
+              displayName: row.name,
+              type: 'seller',
+              status: 'new',
+              email: null,
+              company: null,
+              tags: row.tags ?? [],
+              source,
+              notes: null,
+              assignedUserId: null,
+              createdBy: ctx.userId,
+              phones: list.phones,
+              address: null,
+            });
+            id = created.id;
+            createdIds.push(id);
+          }
+          const zone = validZone(row.timezone);
+          await tx
+            .update(schema.contacts)
+            .set({
+              raw: sql`${schema.contacts.raw} || ${JSON.stringify({ externalId: row.external_id, ...(zone ? { timezone: zone } : {}) })}::jsonb`,
+            })
+            .where(and(eq(schema.contacts.id, id), eq(schema.contacts.orgId, ctx.orgId)));
+          byExternal.set(row.external_id, id);
+          for (const p of list.phones) owners.set(p.phoneE164, id);
+          results.push({ external_id: row.external_id, contact_id: id, status: existingId ? 'merged' : 'created' });
+        }
+      });
+    }
+    await writeAudit(
+      db,
+      audit(ctx, 'contacts.upsert', 'contact', undefined, {
+        rows: rows.length,
+        created: createdIds.length,
+        skipped: results.filter((r) => r.status === 'skipped').length,
+        source,
+      }),
+    );
+    if (createdIds.length > 0) await queueRescore(ctx.orgId, createdIds);
+    return { results };
+  });
+
   app.post('/v1/contacts/bulk/dial-list', write, async (req, reply) => {
     const ctx = req.authCtx!;
     const parsed = dialListSchema.safeParse(req.body ?? {});
@@ -886,6 +1006,12 @@ export function registerContactRoutes(app: FastifyInstance, deps: AppDeps): void
           { id: contact.id, assignedUserId: contact.assigned_user_id },
           'contacts',
         );
+        // The dialer reads the calling-window zone off the lead (dial-sessions.ts).
+        await tx.execute(sql`
+          update leads set raw = leads.raw || jsonb_build_object('timezone', c.raw->>'timezone')
+          from contacts c
+          where leads.id = ${leadId} and leads.org_id = ${ctx.orgId}
+            and c.id = ${contact.id} and c.raw ? 'timezone'`);
         ids.push(leadId);
       }
       return ids;
@@ -894,10 +1020,14 @@ export function registerContactRoutes(app: FastifyInstance, deps: AppDeps): void
     const stamp = new Date().toISOString().slice(0, 16).replace('T', ' ');
     const baseName = input.name ?? `Dial list ${stamp} · ${ctx.displayName}`;
     let campaign: Awaited<ReturnType<typeof createCampaign>> | null = null;
-    for (let attempt = 0; attempt < 5 && !campaign; attempt++) {
-      const name = attempt === 0 ? baseName : `${baseName} (${attempt + 1})`;
+    // CLOZR names every list session the same way ("CLOZR list · Call queue"),
+    // and a session End that never ran leaves the old campaign active, so the
+    // numbered names run out (five did on 2026-10-28). The last try carries
+    // the time so a rep is never told the dialer has no name left.
+    for (let attempt = 0; attempt < 6 && !campaign; attempt++) {
+      const name = attempt === 0 ? baseName : attempt === 5 ? `${baseName} · ${stamp}` : `${baseName} (${attempt + 1})`;
       try {
-        campaign = await createCampaign(dbh, ctx, { name, mode: 'power' });
+        campaign = await createCampaign(dbh, ctx, { name, mode: input.mode, settings: input.settings });
       } catch (err) {
         if (err instanceof CampaignServiceError && err.code === 'name_taken') continue;
         throw err;

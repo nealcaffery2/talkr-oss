@@ -36,7 +36,8 @@ export type TelnyxEndpoint =
   | 'campaign-answer'
   | 'campaign-bridge-complete'
   | 'conference-status'
-  | 'conference-join';
+  | 'conference-join'
+  | 'amd-status';
 
 type P = Record<string, string>;
 
@@ -75,7 +76,18 @@ const MESSAGE_STATUS_MAP: Record<string, string> = {
   'delivery_unconfirmed': 'sent',
   // Messaging API v2 events only.
   'sending_failed': 'failed',
+  expired: 'failed',
+  // RCS read receipts (`message.read`, recipient status `read`).
+  read: 'read',
 };
+
+/** Telnyx v2 `payload.type` → our channel. Absent stays absent (SMS). */
+function channelOf(type: string | undefined): 'sms' | 'rcs' | undefined {
+  if (!type) return undefined;
+  if (type === 'RCS') return 'rcs';
+  if (type === 'SMS' || type === 'MMS') return 'sms';
+  return undefined;
+}
 
 function occurredAt(params: P): Date {
   const t = params.Timestamp ? new Date(params.Timestamp) : new Date();
@@ -152,6 +164,8 @@ export function idempotencyKeyFor(endpoint: TelnyxEndpoint, params: P): string {
       return `telnyx:conference-status:${params.ConferenceSid}:${params.StatusCallbackEvent}:${params.CallSid ?? 'x'}:${params.SequenceNumber ?? 'x'}`;
     case 'conference-join':
       return `telnyx:conference-join:${params.CallSid}`;
+    case 'amd-status':
+      return `telnyx:amd-status:${params.CallSid}:${params.AnsweredBy ?? 'x'}`;
   }
 }
 
@@ -267,12 +281,16 @@ export function normalizeTelnyxWebhook(endpoint: TelnyxEndpoint, params: P): Can
     case 'campaign-answer':
     case 'campaign-bridge-complete':
     case 'conference-join':
+    case 'amd-status':
       // Call-control endpoints do their own synchronous state writes; the
       // async pipeline stores the raw delivery but emits nothing.
       return [];
 
     case 'inbound-sms': {
-      if (!params.MessageSid || !params.From || !params.To) return [];
+      const channel = channelOf(params.MessageType);
+      // An inbound RCS message is addressed to our agent, not to a number; the
+      // server resolves which of our lines it belongs to before applying it.
+      if (!params.MessageSid || !params.From || (!params.To && channel !== 'rcs')) return [];
       const event: CanonicalMessageEvent = {
         type: 'message.received',
         provider: 'telnyx',
@@ -280,12 +298,14 @@ export function normalizeTelnyxWebhook(endpoint: TelnyxEndpoint, params: P): Can
         occurredAt: new Date(),
         data: {
           from: params.From,
-          to: params.To,
+          to: params.To || undefined,
           body: params.Body ?? '',
           status: 'received',
           numMedia: num(params.NumMedia),
           mediaUrls: mediaUrls(params),
           numSegments: num(params.NumSegments),
+          ...(channel ? { channel } : {}),
+          ...(params.RcsAgentId ? { rcsAgentId: params.RcsAgentId } : {}),
         },
         raw: params,
       };
@@ -296,17 +316,22 @@ export function normalizeTelnyxWebhook(endpoint: TelnyxEndpoint, params: P): Can
       if (!params.MessageSid) return [];
       const status = MESSAGE_STATUS_MAP[params.MessageStatus ?? ''];
       if (!status) return [];
+      const channel = channelOf(params.MessageType);
       const event: CanonicalMessageEvent = {
         type: 'message.status',
         provider: 'telnyx',
         providerObjectId: params.MessageSid,
-        occurredAt: new Date(),
+        // Receipt time, as for every SMS status (docs/sms.md §8.5), except a
+        // read receipt, whose moment is the point of it: read_at takes the
+        // event's own occurred_at when the carrier sends one.
+        occurredAt: status === 'read' ? occurredAt(params) : new Date(),
         data: {
           from: params.From || undefined,
           to: params.To || undefined,
           status,
           errorCode: params.ErrorCode || undefined,
           numSegments: num(params.NumSegments),
+          ...(channel ? { channel } : {}),
         },
         raw: params,
       };
@@ -341,9 +366,31 @@ export function flattenMessagingEvent(endpoint: string, body: unknown): P | null
   };
   if (typeof data.occurred_at === 'string') out.Timestamp = data.occurred_at;
   if (typeof payload.parts === 'number') out.NumSegments = String(payload.parts);
+  if (typeof payload.type === 'string' && payload.type) out.MessageType = payload.type;
+  // RCS addresses the agent rather than a number on the side that is ours.
+  const agent = payload.type === 'RCS' ? str(first.agent_id) || str(from.agent_id) : '';
+  if (agent) out.RcsAgentId = agent;
+  const rcsBody = (payload.body ?? {}) as Record<string, unknown>;
 
   if (endpoint === 'inbound-sms') {
-    out.Body = str(payload.text);
+    const suggestion = (rcsBody.suggestion_response ?? {}) as Record<string, unknown>;
+    out.Body =
+      str(payload.text) ||
+      (typeof rcsBody.text === 'string' ? rcsBody.text : '') ||
+      str(suggestion.text);
+    if (payload.type === 'RCS') {
+      // An RCS file arrives as body.user_file.payload, not payload.media[].
+      const file = ((rcsBody.user_file ?? {}) as Record<string, unknown>).payload as Record<string, unknown> | undefined;
+      if (file && typeof file.file_uri === 'string' && file.file_uri) {
+        out.NumMedia = '1';
+        out.MediaUrl0 = file.file_uri;
+        if (typeof file.mime_type === 'string') out.MediaContentType0 = file.mime_type;
+      } else {
+        out.NumMedia = '0';
+      }
+      out.MessageStatus = 'received';
+      return out;
+    }
     out.MessageStatus = 'received';
     const media = Array.isArray(payload.media) ? (payload.media as Array<Record<string, unknown>>) : [];
     const urls = media.filter((m) => typeof m.url === 'string' && m.url);
@@ -355,8 +402,11 @@ export function flattenMessagingEvent(endpoint: string, body: unknown): P | null
     return out;
   }
 
-  // The recipient's status is the message's; message.sent carries `sent`.
-  out.MessageStatus = str(first.status) || (data.event_type === 'message.sent' ? 'sent' : '');
+  // The recipient's status is the message's; message.sent carries `sent`,
+  // message.read (RCS) carries `read`.
+  out.MessageStatus =
+    str(first.status) ||
+    (data.event_type === 'message.sent' ? 'sent' : data.event_type === 'message.read' ? 'read' : '');
   const errors = Array.isArray(payload.errors) ? (payload.errors as Array<Record<string, unknown>>) : [];
   const code = errors[0]?.code;
   if (code != null && code !== '') out.ErrorCode = String(code);

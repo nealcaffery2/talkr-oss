@@ -6,9 +6,10 @@
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { pino } from 'pino';
+import { sql } from 'drizzle-orm';
 import { schema } from '@talkr/db';
 import { applyRuntimeSettings } from '../src/services/runtime-settings.js';
-import { bootstrapTelnyxIfNeeded, telnyxNeedsBootstrap } from '../src/services/telnyx-bootstrap.js';
+import { WIRING_CHECKED_KEY, bootstrapTelnyxIfNeeded, telnyxNeedsBootstrap } from '../src/services/telnyx-bootstrap.js';
 import { createTestContext, testConfig, type TestContext } from './helpers.js';
 
 const PUBLIC_KEY = Buffer.alloc(32, 7).toString('base64');
@@ -105,23 +106,27 @@ describe('telnyx bootstrap', () => {
     expect((sip.outbound as { outbound_voice_profile_id: string }).outbound_voice_profile_id).toBe('out-1');
     expect(sip.sip_uri_calling_preference).toBe('internal');
 
-    // The rows are there for the next boot, which then has nothing to provision:
-    // it only re-reads the SIP preference and the webhook URLs, and writes nothing.
+    // The rows are there for the next boot, which then has nothing to provision.
+    // It re-reads the SIP preference and the webhook URLs once per set of ids
+    // and remembers that it did: a serverless host boots on every cold start,
+    // and those GETs on each one were what spent the Telnyx rate limit.
     const rows = await t.dbh.db.select().from(schema.runtimeSettings);
     const byKey = Object.fromEntries(rows.map((r) => [r.key, r.value]));
     expect(byKey.TELNYX_TEXML_APP_ID).toBe('tex-1');
     expect(byKey.TELNYX_BOOTSTRAP_ERROR).toBeUndefined();
     expect(telnyxNeedsBootstrap(after)).toBe(false);
-    const again = fakeTelnyx({
-      existing: {
-        '/credential_connections': [
-          { id: 'cre-1', connection_name: 'talkr-browsers', sip_uri_calling_preference: 'internal' },
-        ],
-      },
-    });
+    const existing = {
+      '/credential_connections': [{ id: 'cre-1', connection_name: 'talkr-browsers', sip_uri_calling_preference: 'internal' }],
+    };
+    const again = fakeTelnyx({ existing });
     await bootstrapTelnyxIfNeeded(t.dbh, after, logger, again.http);
     expect(again.calls.every((c) => c.method === 'GET')).toBe(true);
     expect(again.calls[0]).toEqual({ method: 'GET', path: '/credential_connections/cre-1', body: undefined });
+    const checked = await t.dbh.db.select().from(schema.runtimeSettings).where(sql`key = ${WIRING_CHECKED_KEY}`);
+    expect(checked[0]?.value).toBe('cre-1|tex-1|msg-existing');
+    const third = fakeTelnyx({ existing });
+    await bootstrapTelnyxIfNeeded(t.dbh, after, logger, third.http);
+    expect(third.calls).toEqual([]);
   });
 
   it('PATCHes an existing talkr-browsers connection when sip_uri_calling_preference is wrong', async () => {

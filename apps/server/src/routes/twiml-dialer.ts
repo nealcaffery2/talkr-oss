@@ -19,6 +19,7 @@ import { enqueueJob, schema } from '@talkr/db';
 import type { TelnyxVoiceProvider } from '@talkr/provider-telnyx';
 import type { AppDeps } from '../app.js';
 import { clientTargetsFor } from '../services/client-address.js';
+import { kickJob } from '../services/job-kick.js';
 import { receiveTwilioWebhook } from './webhooks.js';
 import {
   evaluateAbandonmentCap,
@@ -148,7 +149,7 @@ export function registerDialerTwimlRoutes(app: FastifyInstance, deps: AppDeps): 
       sendTwiml(
         reply,
         settings.amdAction === 'voicemail_drop'
-          ? provider.buildVoicemailDropResponse(settings.amdVoicemailText)
+          ? provider.buildVoicemailDropResponse(settings.amdVoicemailText, settings.amdVoicemailUrl)
           : provider.buildHangupResponse(),
       );
       return reply;
@@ -175,8 +176,12 @@ export function registerDialerTwimlRoutes(app: FastifyInstance, deps: AppDeps): 
     });
 
     if (claim.won) {
-      // Cancel the losing legs asynchronously (provider REST never runs on
-      // the call-control path). Exactly one job per batch.
+      // Cancel the losing legs through the queue (durable, exactly one job
+      // per batch), and run that job now rather than on the worker's next
+      // tick: on the serverless deployment the tick is a once-a-minute cron,
+      // and a sibling that answered 26s after the winner (2026-10-29) was
+      // abandoned, which tripped the cap and pinned the session to one line.
+      // Capped so the winner's bridge TwiML is not held long.
       if (batchId && !claim.alreadyWon) {
         await enqueueJob(dbh.db, {
           jobType: 'cancel-sibling-dials',
@@ -184,7 +189,12 @@ export function registerDialerTwimlRoutes(app: FastifyInstance, deps: AppDeps): 
           dedupeKey: `cancel-siblings:${batchId}`,
           correlationId: call.correlationId,
         });
+        await kickJob(`cancel-siblings:${batchId}`, 1_500);
       }
+      // The browser hears this before the invite: it arms its softphone to
+      // take the bridge and shows the winner's card. The same callId tells it
+      // which of the batch's lines the rep is now on.
+      await publishSessionEvent(dbh, session, { event: 'bridged', callId: call.id });
       // The rep's browser is a SIP endpoint: ring the address their credential names.
       const { targets } = await clientTargetsFor(dbh, provider, [session.userId]);
       sendTwiml(
@@ -204,7 +214,9 @@ export function registerDialerTwimlRoutes(app: FastifyInstance, deps: AppDeps): 
 
     // ABANDONED (docs/dialers.md §7 C6): a human answered and no rep can
     // bridge. Journaled, counted, retry-scheduled, cap evaluated — and the
-    // caller hears an identification message, never silent dead air.
+    // caller hears the rep's own recording (the campaign's voicemail clip,
+    // "sorry I missed you, call me back") or, without one, an identification
+    // message. Never silent dead air.
     const inserted = await journal(call, 'call.abandoned', `${callSid}:abandoned:x`, {
       reason: claim.reason,
       batchId: batchId ?? null,
@@ -231,7 +243,7 @@ export function registerDialerTwimlRoutes(app: FastifyInstance, deps: AppDeps): 
     const message =
       orgSettings.dialerAbandonMessage ??
       `You were called by ${org?.name ?? 'our office'} at ${call.fromNumber}. We are sorry we missed you and will try to reach you again. Goodbye.`;
-    sendTwiml(reply, provider.buildRejectResponse(message));
+    sendTwiml(reply, provider.buildRejectResponse(message, settings.amdVoicemailUrl));
     return reply;
   });
 

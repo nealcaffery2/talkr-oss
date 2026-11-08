@@ -4,7 +4,7 @@
  * resolution, and the missed-call auto-text.
  */
 
-import { and, eq, gte, inArray, ne, sql } from 'drizzle-orm';
+import { and, eq, gt, gte, inArray, isNotNull, isNull, ne, sql } from 'drizzle-orm';
 import {
   LAST_CONTACT_MAX_DAYS,
   flowReferences,
@@ -29,6 +29,8 @@ const DEFAULT_GREETING =
  * Everything the executor may ask about one org, in four queries.
  * `available: 'all'` is the simulator's default: pretend everyone is in.
  */
+const mode0 = (m: 'presence' | 'all' | { except: string[] } | undefined) => (m === undefined || m === 'presence' ? 'presence' : 'other');
+
 export async function loadFlowFacts(
   db: Db,
   orgId: string,
@@ -55,6 +57,25 @@ export async function loadFlowFacts(
   const teams: Record<string, string[]> = {};
   for (const m of members) if (active.has(m.userId)) (teams[m.teamId] ??= []).push(m.userId);
   const presence = await loadPresenceMap(db, [...active]);
+  // A rep on a live call is not offered another one. Their browser declines
+  // the fork anyway (Clozr #748), and ringing them used to answer the caller
+  // with a voicemail drop over the live call (2026-11-05). Answered in the
+  // last 3 hours and not ended: an older row stuck in progress (a lost
+  // webhook) must not hide a rep from every call for good.
+  const busy = new Set(
+    mode0(opts.available) === 'presence'
+      ? (await db
+          .select({ userId: schema.calls.userId })
+          .from(schema.calls)
+          .where(and(
+            eq(schema.calls.orgId, orgId),
+            inArray(schema.calls.userId, [...active]),
+            isNotNull(schema.calls.answeredAt),
+            isNull(schema.calls.endedAt),
+            gt(schema.calls.answeredAt, new Date(now.getTime() - 3 * 3_600_000)),
+          ))).map((r) => r.userId).filter((id): id is string => !!id)
+      : [],
+  );
   const phones = new Map(users.map((u) => [u.id, u.personal]));
   const mode = opts.available ?? 'presence';
   // Every target's window fits inside the longest one; core filters per target.
@@ -68,7 +89,7 @@ export async function loadFlowFacts(
     leadOwnerUserId: opts.leadOwnerUserId && active.has(opts.leadOwnerUserId) ? opts.leadOwnerUserId : null,
     lastTouches,
     isAvailable: (id) =>
-      mode === 'all' ? active.has(id) : typeof mode === 'object' ? active.has(id) && !mode.except.includes(id) : isAvailable(presence.get(id), now),
+      mode === 'all' ? active.has(id) : typeof mode === 'object' ? active.has(id) && !mode.except.includes(id) : isAvailable(presence.get(id), now) && !busy.has(id),
     lastRungAt: (id) => presence.get(id)?.lastRungAt?.getTime() ?? -1,
     personalPhone: (id) => phones.get(id) ?? null,
     tried: opts.tried ?? {},

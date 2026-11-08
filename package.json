@@ -11,11 +11,12 @@
     "packages/core",
     "packages/db",
     "packages/provider-telnyx",
+    "packages/provider-sendblue",
     "apps/server",
     "apps/web"
   ],
   "scripts": {
-    "typecheck": "tsc --noEmit -p packages/core && tsc --noEmit -p packages/db && tsc --noEmit -p packages/provider-telnyx && tsc --noEmit -p apps/server",
+    "typecheck": "tsc --noEmit -p packages/core && tsc --noEmit -p packages/db && tsc --noEmit -p packages/provider-telnyx && tsc --noEmit -p packages/provider-sendblue && tsc --noEmit -p apps/server",
     "test": "vitest run",
     "test:watch": "vitest",
     "db:generate": "drizzle-kit generate --config packages/db/drizzle.config.ts",

@@ -446,7 +446,18 @@ export async function smsDecision(db: DbLike, org: OrgRow, fromE164: string, toE
       .limit(1)
   )[0];
   const cap = number ? readNumberProtection(number.reputation).daily_sms_cap : null;
-  if (number && cap !== null && (await sentToday(db, org, 'sms', number)) >= cap) {
+  // A person's default line is where their live conversations are: never cap it.
+  const someonesDefault = number && cap !== null
+    ? (await db.select({ id: schema.users.id }).from(schema.users)
+      .where(and(eq(schema.users.orgId, org.id), eq(schema.users.defaultPhoneNumberId, number.id))).limit(1)).length > 0
+    : false;
+  // The cap throttles cold outreach. Someone who has texted this line back is a live
+  // conversation, and a reply to them is never refused.
+  const theyReplied = number && cap !== null && !someonesDefault
+    ? (await db.execute(sql`SELECT 1 FROM conversations cv JOIN messages m ON m.conversation_id = cv.id
+        WHERE cv.org_id = ${org.id} AND cv.our_number = ${fromE164} AND cv.their_number = ${toE164} AND m.direction = 'inbound' LIMIT 1`)).rows.length > 0
+    : false;
+  if (number && cap !== null && !someonesDefault && !theyReplied && (await sentToday(db, org, 'sms', number)) >= cap) {
     return { action: 'block', reason: `${fromE164} reached its daily cap of ${cap} texts. Send from another line, or raise the cap under Settings, Phone numbers, Reputation.` };
   }
   const t = readTenDlc(org.reputation);

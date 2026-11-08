@@ -147,6 +147,7 @@ describe('AMD machine handling', () => {
     expect(result.idle).toBe(false);
     const dial = ctx.providerDials.at(-1)!;
     expect(dial.machineDetection).toBe('detect_message_end'); // drop lands after the greeting
+    expect(dial.machineDetectionTimeoutMs).toBe(6_000); // a quiet human is bridged after 6s, not the carrier's 30s
     const call = await getCall(ctx, result.lines![0]!.call.id);
     const lead = leads.find((l) => l.phone === call.toNumber)!;
 

@@ -18,6 +18,9 @@ import { seedWorkflowFanout } from './worker/workflow-fanout.js';
 import { seedDialerWatch } from './worker/dialer-handlers.js';
 import { scheduleContactTemperatureSweep } from './worker/contact-temperature-sweep.js';
 import { scheduleTranscriptRetrySweep } from './worker/transcribe-handlers.js';
+import { scheduleStuckCallSweep } from './worker/stuck-call-sweep.js';
+import { scheduleRecordingSweep } from './worker/recording-sweep.js';
+import { scheduleSmsStatusSweep } from './worker/sms-status-sweep.js';
 
 if (process.argv[1]?.endsWith('worker-main.ts')) {
   let config = loadConfig();
@@ -99,12 +102,43 @@ if (process.argv[1]?.endsWith('worker-main.ts')) {
   await scheduleTranscriptRetries();
   const transcriptRetryTimer = setInterval(() => void scheduleTranscriptRetries(), 5 * 60_000);
 
+  // Outbound calls no carrier status ever ended (worker/stuck-call-sweep):
+  // every five minutes, deduped per bucket like the transcript retries.
+  const scheduleStuckCalls = async () => {
+    await scheduleStuckCallSweep(dbh.db).catch((err: Error) =>
+      logger.warn({ err: err.message }, 'stuck call sweep enqueue failed'),
+    );
+  };
+  await scheduleStuckCalls();
+  const stuckCallTimer = setInterval(() => void scheduleStuckCalls(), 5 * 60_000);
+
+  // Answered calls whose recording webhook never arrived (worker/recording-sweep).
+  const scheduleRecordings = async () => {
+    await scheduleRecordingSweep(dbh.db).catch((err: Error) =>
+      logger.warn({ err: err.message }, 'recording sweep enqueue failed'),
+    );
+  };
+  await scheduleRecordings();
+  const recordingSweepTimer = setInterval(() => void scheduleRecordings(), 5 * 60_000);
+
+  // Texts whose delivery receipt never arrived (worker/sms-status-sweep).
+  const scheduleSmsStatuses = async () => {
+    await scheduleSmsStatusSweep(dbh.db).catch((err: Error) =>
+      logger.warn({ err: err.message }, 'sms status sweep enqueue failed'),
+    );
+  };
+  await scheduleSmsStatuses();
+  const smsStatusSweepTimer = setInterval(() => void scheduleSmsStatuses(), 5 * 60_000);
+
   for (const signal of ['SIGINT', 'SIGTERM'] as const) {
     process.on(signal, async () => {
+      clearInterval(smsStatusSweepTimer);
       clearInterval(costSweepTimer);
       clearInterval(workflowSweepTimer);
       clearInterval(contactSweepTimer);
       clearInterval(transcriptRetryTimer);
+      clearInterval(stuckCallTimer);
+      clearInterval(recordingSweepTimer);
       runner.stop();
       await dbh.close();
       process.exit(0);

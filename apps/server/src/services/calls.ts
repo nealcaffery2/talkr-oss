@@ -23,7 +23,8 @@ export class CallServiceError extends Error {
       | 'call_not_active'
       | 'already_bound'
       | 'browser_leg_is_client'
-      | 'number_protected',
+      | 'number_protected'
+      | 'carrier_refused',
     message: string,
   ) {
     super(message);
@@ -36,6 +37,12 @@ export interface CreateCallInput {
   leadId?: string;
   /** Per-call caller-ID pick from the dialer; validated by the route. */
   fromPhoneNumberId?: string;
+  /**
+   * Run answering-machine detection on the seller leg (calls.raw.amd). A
+   * partner CRM's power or predictive session asks for it; a rep dialing by
+   * hand does not, so they hear the greeting and can leave a message.
+   */
+  amd?: boolean;
   /**
    * Dialer session context (Phase 5, docs/dialers.md §1): stamped into
    * calls.raw (the queueId precedent). Optional and additive — plain
@@ -129,6 +136,8 @@ export async function createOutboundCall(
     overridePhoneNumberId: input.fromPhoneNumberId ?? null,
     campaignPhoneNumberId: input.campaignContext?.callerIdPhoneNumberId ?? null,
     user: user ?? null,
+    // A session line with no campaign pin spreads the rep's own numbers.
+    rotate: Boolean(input.campaignContext),
   });
   if (!fromNumber) throw new CallServiceError('no_caller_id', 'org has no active phone number');
 
@@ -165,9 +174,11 @@ export async function createOutboundCall(
         // Stamp the number's carrier (schema default is still 'twilio').
         provider: fromNumber.provider,
         // Dialer linkage rides raw (docs/dialers.md §1) — no calls columns.
+        ...(input.amd && !input.campaignContext ? { raw: { amd: true } } : {}),
         ...(input.campaignContext
           ? {
               raw: {
+                amd: true,
                 campaignId: input.campaignContext.campaignId,
                 dialSessionId: input.campaignContext.dialSessionId,
                 campaignLeadId: input.campaignContext.campaignLeadId,

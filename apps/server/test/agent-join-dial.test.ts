@@ -60,6 +60,28 @@ describe('customer dial when the agent joins the room', () => {
     expect(after.filter((p) => p.role === 'customer')).toHaveLength(1);
   });
 
+  it('cancels the seller still ringing when the rep leaves and the room ends', async () => {
+    const created = await t.app.inject({ method: 'POST', url: '/v1/calls', headers: rep, payload: { to_number: '+12165550178' } });
+    const callId = created.json().call.id as string;
+    const room = `talkr-${callId}`;
+    await webhookPost(t, '/webhooks/telnyx/conference-status',
+      conferenceStatus({ event: 'participant-join', conferenceSid: 'CF_room_2', friendlyName: room, callSid: 'CA_agent_join_2', sequence: 1 }));
+    const customerSid = t.conferenceOps.added.at(-1)!.providerParticipantId;
+
+    // The rep's leg drops before the seller answers: the room ends without them.
+    const before = t.canceledCalls.length;
+    await webhookPost(t, '/webhooks/telnyx/conference-status',
+      conferenceStatus({ event: 'conference-end', conferenceSid: 'CF_room_2', friendlyName: room, sequence: 2, reasonConferenceEnded: 'participant-with-end-conference-on-exit-left' }));
+    expect(t.canceledCalls.slice(before)).toEqual([customerSid]);
+    const parts = await t.dbh.db.select().from(schema.callParticipants).where(eq(schema.callParticipants.callId, callId));
+    expect(parts.find((p) => p.role === 'customer')!.state).toBe('left');
+
+    // A redelivered end cancels nothing more.
+    await webhookPost(t, '/webhooks/telnyx/conference-status',
+      conferenceStatus({ event: 'conference-end', conferenceSid: 'CF_room_2', friendlyName: room, sequence: 2, reasonConferenceEnded: 'participant-with-end-conference-on-exit-left' }));
+    expect(t.canceledCalls.slice(before)).toEqual([customerSid]);
+  });
+
   it('leaves rooms that are not ours alone', async () => {
     const before = t.conferenceOps.added.length;
     const res = await webhookPost(

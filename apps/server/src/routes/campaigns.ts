@@ -12,6 +12,7 @@ import { hasPermission } from '../auth.js';
 import {
   CampaignServiceError,
   attachLeads,
+  campaignQueue,
   campaignStats,
   createCampaign,
   detachLeads,
@@ -38,7 +39,7 @@ function requirePermission(permission: Permission) {
   };
 }
 
-const settingsSchema = z
+export const settingsSchema = z
   .object({
     callerIdPhoneNumberId: z.string().uuid().optional(),
     callingWindowStart: z.string().optional(),
@@ -52,6 +53,7 @@ const settingsSchema = z
     amdEnabled: z.boolean().optional(),
     amdAction: z.enum(['hangup', 'voicemail_drop']).optional(),
     amdVoicemailText: z.string().max(500).optional(),
+    amdVoicemailUrl: z.string().url().max(2000).optional(),
   })
   .strict();
 
@@ -123,6 +125,7 @@ function mapError(err: unknown, reply: FastifyReply): FastifyReply | null {
       already_bound: 409,
       browser_leg_is_client: 409,
       number_protected: 429,
+      carrier_refused: 502,
     };
     return reply.code(status[err.code]).send({ error: err.code, message: err.message });
   }
@@ -313,6 +316,21 @@ export function registerCampaignRoutes(app: FastifyInstance, deps: AppDeps): voi
           calls: stats.calls,
           abandonment: stats.abandonment,
         };
+      } catch (err) {
+        return mapError(err, reply) ?? Promise.reject(err);
+      }
+    },
+  );
+
+  app.get(
+    '/v1/campaigns/:id/queue',
+    { preHandler: requirePermission('campaigns.run') },
+    async (req, reply) => {
+      const ctx = req.authCtx!;
+      const { id } = req.params as { id: string };
+      const limit = Number((req.query as { limit?: string }).limit ?? 12);
+      try {
+        return { leads: await campaignQueue(dbh, ctx, id, Number.isFinite(limit) ? limit : 12) };
       } catch (err) {
         return mapError(err, reply) ?? Promise.reject(err);
       }

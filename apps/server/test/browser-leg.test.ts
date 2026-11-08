@@ -126,4 +126,30 @@ describe('browser leg on Telnyx', () => {
     expect(row!.status).toBe('busy');
     expect(row!.failureClass).toBe('platform_failure');
   });
+
+  it('a dial the carrier refuses fails the call at once, with the carrier’s reason', async () => {
+    // 2026-10-27: Telnyx answered the browser-leg dial with 403 D61. The call
+    // sat "queued" and silent for ten minutes until the stuck-call sweep.
+    const created = await t.app.inject({ method: 'POST', url: '/v1/calls', headers: rep, payload: { to_number: '+12165550147' } });
+    const id = created.json().call.id as string;
+    const real = t.provider.createCall;
+    t.provider.createCall = async () => {
+      const err = new Error('Telnyx POST https://api.telnyx.com/v2/texml/calls/app → 403') as Error & { body?: string };
+      err.body = JSON.stringify({ errors: [{ code: '10010', detail: "Busy Here D61. The user portal level doesn't allow this type of calls." }] });
+      throw err;
+    };
+    try {
+      const res = await t.app.inject({ method: 'POST', url: `/v1/calls/${id}/browser-leg`, headers: rep });
+      expect(res.statusCode).toBe(502);
+      expect(res.json()).toMatchObject({ error: 'carrier_refused' });
+      expect(res.json().message).toContain('Busy Here D61');
+    } finally {
+      t.provider.createCall = real;
+    }
+    const [row] = await t.dbh.db.select().from(schema.calls).where(eq(schema.calls.id, id));
+    expect(row!.status).toBe('failed');
+    expect(row!.failureClass).toBe('platform_failure');
+    expect(row!.failureDetail).toContain('Busy Here D61');
+    expect(row!.endedAt).not.toBeNull();
+  });
 });

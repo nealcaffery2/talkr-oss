@@ -18,6 +18,7 @@
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@talkr/core": "*",
     "@talkr/db": "*",
+    "@talkr/provider-sendblue": "*",
     "@talkr/provider-telnyx": "*",
     "fastify": "^5.0.0",
     "jose": "^6.0.0",

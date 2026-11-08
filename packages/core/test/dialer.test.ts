@@ -17,6 +17,8 @@ import {
   isMachineAnsweredBy,
   isWithinCallingWindow,
   pickNextCampaignLead,
+  isAiLine,
+  pickRotatedCallerId,
   resolveCampaignSettings,
   timezoneForCandidate,
   type CampaignLeadCandidate,
@@ -40,8 +42,8 @@ describe('resolveCampaignSettings', () => {
     expect(s.amdAction).toBe('hangup');
   });
 
-  it('hard-caps parallel lines at 3 no matter the config (C7)', () => {
-    expect(resolveCampaignSettings({ parallelLines: 10 }).parallelLines).toBe(
+  it('hard-caps parallel lines at 10 no matter the config (C7)', () => {
+    expect(resolveCampaignSettings({ parallelLines: 25 }).parallelLines).toBe(
       PARALLEL_LINES_HARD_CAP,
     );
     expect(resolveCampaignSettings({ parallelLines: 0 }).parallelLines).toBe(1);
@@ -301,28 +303,34 @@ describe('abandonment rate + cap decision', () => {
     expect(abandonmentRate({ answered: 100, abandoned: 3 })).toBeCloseTo(0.03);
   });
 
-  it('breaches strictly above 3%: the very first abandon trips it', () => {
-    expect(isAbandonmentCapBreached({ answered: 1, abandoned: 1 }, 3)).toBe(true);
+  it('breaches strictly above 3% once the window holds a sample', () => {
     expect(isAbandonmentCapBreached({ answered: 33, abandoned: 1 }, 3)).toBe(true); // 3.03%
     expect(isAbandonmentCapBreached({ answered: 100, abandoned: 3 }, 3)).toBe(false); // 3.00%
     expect(isAbandonmentCapBreached({ answered: 0, abandoned: 0 }, 3)).toBe(false);
   });
 
+  it('is not judged under the sample floor: one abandon in four answers is a fluke', () => {
+    expect(isAbandonmentCapBreached({ answered: 1, abandoned: 1 }, 3)).toBe(false);
+    expect(isAbandonmentCapBreached({ answered: 3, abandoned: 1 }, 3)).toBe(false);
+    expect(isAbandonmentCapBreached({ answered: 18, abandoned: 1 }, 3)).toBe(false); // sample 19
+    expect(isAbandonmentCapBreached({ answered: 19, abandoned: 1 }, 3)).toBe(true); // sample 20, 5.3%
+  });
+
   it('recovers when the windowed rate falls back under the cap', () => {
-    expect(isAbandonmentCapBreached({ answered: 10, abandoned: 1 }, 3)).toBe(true);
+    expect(isAbandonmentCapBreached({ answered: 25, abandoned: 1 }, 3)).toBe(true);
     // The window rolled: same abandon count over many more answered calls.
     expect(isAbandonmentCapBreached({ answered: 200, abandoned: 1 }, 3)).toBe(false);
   });
 
   it('a configured cap above 3 is still evaluated at 3 (hard cap)', () => {
-    expect(isAbandonmentCapBreached({ answered: 10, abandoned: 1 }, 50)).toBe(true);
+    expect(isAbandonmentCapBreached({ answered: 25, abandoned: 1 }, 50)).toBe(true);
   });
 
   it('effectiveLineCount honors the reduction and the hard cap', () => {
     const settings = resolveCampaignSettings({ parallelLines: 3 });
     expect(effectiveLineCount(settings, null)).toBe(3);
     expect(effectiveLineCount(settings, 1)).toBe(1);
-    expect(effectiveLineCount(resolveCampaignSettings({ parallelLines: 99 }), null)).toBe(3);
+    expect(effectiveLineCount(resolveCampaignSettings({ parallelLines: 99 }), null)).toBe(10);
   });
 });
 
@@ -351,5 +359,42 @@ describe('AMD + pacing interface', () => {
     });
     expect(roomy.linesToDial).toBeLessThanOrEqual(2 * PARALLEL_LINES_HARD_CAP);
     expect(roomy.linesToDial).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe('pickRotatedCallerId', () => {
+  const lines = [
+    { id: 'a', phoneE164: '+12105558073', areaCode: '210', assignedUserId: 'alex' },
+    { id: 'b', phoneE164: '+12105557385', areaCode: '210', assignedUserId: 'alex' },
+    { id: 'c', phoneE164: '+14045552738', areaCode: '404', assignedUserId: 'alex' },
+    { id: 'd', phoneE164: '+13145550925', areaCode: '314', assignedUserId: 'riley' },
+    { id: 'e', phoneE164: '+12105550000', areaCode: '210', assignedUserId: 'alex', voice: false },
+  ];
+  it("prefers the rep's own line in the destination area code, least used first", () => {
+    const usage = new Map([['+12105558073', 36], ['+12105557385', 10]]);
+    expect(pickRotatedCallerId(lines, { userId: 'alex', toNumber: '+12105551342', usage })?.id).toBe('b');
+  });
+  it("rotates to the least-used of the rep's lines when nothing is local", () => {
+    const usage = new Map([['+12105558073', 36], ['+12105557385', 10], ['+14045552738', 12]]);
+    expect(pickRotatedCallerId(lines, { userId: 'alex', toNumber: '+13145551035', usage })?.id).toBe('b');
+  });
+  it("never dials from another rep's line or a text-only line", () => {
+    const usage = new Map([['+12105558073', 0], ['+12105557385', 0], ['+14045552738', 0]]);
+    const pick = pickRotatedCallerId(lines, { userId: 'alex', toNumber: '+13145551035', usage });
+    expect(['a', 'b', 'c']).toContain(pick?.id);
+    expect(pickRotatedCallerId(lines, { userId: 'nobody', toNumber: '+13145551035', usage })).toBeNull();
+  });
+});
+
+describe('isAiLine', () => {
+  it("spots an AI agent's line by CLOZR's label", () => {
+    expect(isAiLine({ label: 'AI · Riley (lead manager)' })).toBe(true);
+    expect(isAiLine({ label: ' ai · Houston' })).toBe(true);
+  });
+  it('leaves rep lines alone', () => {
+    expect(isAiLine({ label: 'Morgan · Austin 1' })).toBe(false);
+    expect(isAiLine({ label: 'AIM Properties' })).toBe(false);
+    expect(isAiLine({ label: null })).toBe(false);
+    expect(isAiLine({})).toBe(false);
   });
 });

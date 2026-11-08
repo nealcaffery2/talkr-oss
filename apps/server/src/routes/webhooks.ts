@@ -6,16 +6,18 @@
 
 import { randomUUID } from 'node:crypto';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { eq } from 'drizzle-orm';
-import { conferenceRoomName, holdMusicWaitUrl, maskPhone, readHoldMusic } from '@talkr/core';
-import { enqueueJob, schema } from '@talkr/db';
+import { eq, sql } from 'drizzle-orm';
+import { conferenceRoomName, holdMusicWaitUrl, isMachineAnsweredBy, maskPhone, readHoldMusic } from '@talkr/core';
+import { enqueueJob, publishBusEvent, schema } from '@talkr/db';
 import type { AppDeps } from '../app.js';
 import { ingestWebhook } from '../services/ingest.js';
+import { kickJob } from '../services/job-kick.js';
 import { clientAddressFor } from '../services/client-address.js';
 import { applyCanonicalEvent } from '../services/apply-events.js';
 import {
   CONFERENCE_DIAL_FALLBACK_DELAY_MS,
   dialCustomerIntoConference,
+  cancelRingingOnRoomEnd,
   dialCustomerOnAgentJoin,
 } from '../services/conference-dial.js';
 import { writeAudit } from '../services/audit.js';
@@ -56,7 +58,8 @@ export async function receiveTwilioWebhook(
     | 'sms-status'
     | 'campaign-answer'
     | 'campaign-bridge-complete'
-    | 'conference-status',
+    | 'conference-status'
+    | 'amd-status',
   opts: { enqueueProcessing: boolean; jobType?: string },
 ): Promise<HandledWebhook> {
   const { config, dbh, provider } = deps;
@@ -134,11 +137,26 @@ export function registerWebhookRoutes(app: FastifyInstance, deps: AppDeps): void
   const { config, dbh, provider, logger } = deps;
 
   // -------------------------------------------------------------------------
-  // Status callbacks: pure ingestion, processed async by the worker.
+  // Status callbacks: ingested, then applied right away where it matters.
   // -------------------------------------------------------------------------
+  /**
+   * Apply a just-stored call status now, not on the worker's next tick. On
+   * the serverless deployment the tick is a once-a-minute cron, so a line's
+   * no_answer or hangup reached the calls table 15 to 50 seconds after the
+   * carrier sent it (2026-10-29, Alex's session): the dial session refused
+   * Next with call_in_flight for a line that had already died, and the bar
+   * showed it ringing long after. Capped short so the ack to Telnyx stays
+   * fast; the tick finishes anything a kick did not (services/job-kick.ts).
+   */
+  const applyNow = (handled: { valid: boolean; duplicate: boolean; webhookEventId?: string | null }) =>
+    handled.valid && !handled.duplicate && handled.webhookEventId
+      ? kickJob(`process-webhook:${handled.webhookEventId}`, 2_000)
+      : Promise.resolve();
+
   app.post('/webhooks/telnyx/voice-status', async (req, reply) => {
     const handled = await receiveTwilioWebhook(deps, req, 'voice-status', { enqueueProcessing: true });
     if (!handled.valid) return reply.code(403).send('invalid signature');
+    await applyNow(handled);
     return reply.code(200).send('ok');
   });
 
@@ -177,6 +195,43 @@ export function registerWebhookRoutes(app: FastifyInstance, deps: AppDeps): void
           'customer dial on participant-join failed; the queued fallback will retry',
         );
       }
+    }
+    // The room ended (the rep's leg left) with the seller still ringing: cancel
+    // that ring, or they answer into a room nobody is in.
+    if (!handled.duplicate && handled.params.StatusCallbackEvent === 'conference-end') {
+      await cancelRingingOnRoomEnd({ dbh, provider, config, logger }, handled.params).catch((err: Error) =>
+        logger.warn({ room: handled.params.FriendlyName, err: err.message }, 'cancel ringing at room end failed'),
+      );
+    }
+    return reply.code(200).send('ok');
+  });
+
+  /**
+   * Machine detection on a session call's seller leg (core customerParticipantParams).
+   * The verdict is stamped on calls.raw.amdResult (abandonment and stats already
+   * read it) and a machine goes to the rep's browser as `call.updated` with
+   * `data.answeredBy`: the browser drops the rep's voicemail and dials on.
+   */
+  app.post('/webhooks/telnyx/amd-status', async (req, reply) => {
+    const handled = await receiveTwilioWebhook(deps, req, 'amd-status', { enqueueProcessing: false });
+    if (!handled.valid) return reply.code(403).send('invalid signature');
+    const callId = handled.merged.call;
+    const answeredBy = handled.params.AnsweredBy;
+    if (handled.duplicate || !callId || !answeredBy) return reply.code(200).send('ok');
+    const call = (await dbh.db.select().from(schema.calls).where(eq(schema.calls.id, callId)).limit(1))[0];
+    if (!call) return reply.code(200).send('ok');
+    await dbh.db.execute(sql`
+      UPDATE calls SET raw = coalesce(raw, '{}'::jsonb) || jsonb_build_object('amdResult', ${answeredBy}::text)
+      WHERE id = ${call.id}`);
+    if (isMachineAnsweredBy(answeredBy)) {
+      await publishBusEvent(dbh.pool, {
+        type: 'call.updated',
+        orgId: call.orgId,
+        userId: call.userId ?? undefined,
+        callId: call.id,
+        status: call.status,
+        data: { answeredBy },
+      }).catch((err: Error) => logger.warn({ callId: call.id, err: err.message }, 'amd bus publish failed'));
     }
     return reply.code(200).send('ok');
   });
@@ -368,6 +423,7 @@ export function registerWebhookRoutes(app: FastifyInstance, deps: AppDeps): void
   app.post('/twiml/dial-complete', async (req, reply) => {
     const handled = await receiveTwilioWebhook(deps, req, 'dial-complete', { enqueueProcessing: true });
     if (!handled.valid) return reply.code(403).send('invalid signature');
+    await applyNow(handled);
     sendTwiml(reply, provider.buildHangupResponse());
     return reply;
   });

@@ -54,6 +54,17 @@ export type CampaignLeadRow = typeof schema.campaignLeads.$inferSelect;
 
 const CANDIDATE_BATCH = 25;
 const MAX_PICKS_PER_LINE = 5;
+/**
+ * Telnyx holds the answer URL until AMD decides, up to 30s by default. A
+ * person who answers and says little is "not sure" for the whole 30s: dead
+ * air for them, and every sibling line that answers meanwhile is abandoned
+ * (2026-10-28, three sessions, zero bridges). Cap the wait; `not_sure` is
+ * bridged like a human. ponytail: a greeting longer than this reaches the rep
+ * as a live call; make it a campaign setting if that happens often.
+ */
+const PARALLEL_AMD_TIMEOUT_MS = 6_000;
+/** Ring timeout (30s, provider default) plus slack for a late status callback. */
+const UNANSWERED_LEG_GRACE_MS = 45_000;
 
 // ---------------------------------------------------------------------------
 // Session lifecycle
@@ -596,11 +607,16 @@ export async function sessionNext(
   const settings = resolveCampaignSettings(campaign.settings as CampaignSettings);
 
   // One dial (or batch) at a time per session: refuse while a session call
-  // is still in flight.
+  // is still in flight. A leg nobody answered is dead at the carrier once
+  // its ring timeout (30s) is well past, whatever the calls table still
+  // says: its status callback may be queued behind the worker tick. Only an
+  // answered leg counts without a time bound.
   const inFlight = await dbh.db.execute(sql`
     SELECT id FROM calls
     WHERE raw->>'dialSessionId' = ${session.id}
       AND status IN ('queued','initiated','ringing','in_progress')
+      AND (answered_at IS NOT NULL
+        OR created_at > now() - (${UNANSWERED_LEG_GRACE_MS} || ' milliseconds')::interval)
     LIMIT 1`);
   if (inFlight.rows.length > 0) {
     throw new DialSessionError('call_in_flight', 'a session call is still in flight');
@@ -746,6 +762,7 @@ async function placeRestDial(
               settings.amdAction === 'voicemail_drop'
                 ? ('detect_message_end' as const)
                 : ('enable' as const),
+            machineDetectionTimeoutMs: PARALLEL_AMD_TIMEOUT_MS,
           }
         : {}),
     });
@@ -826,7 +843,7 @@ export async function sessionDetail(dbh: DbHandle, ctx: AuthContext, sessionId: 
   const currentCalls = await dbh.db.execute(sql`
     SELECT id FROM calls
     WHERE raw->>'dialSessionId' = ${session.id}
-    ORDER BY created_at DESC LIMIT 3`);
+    ORDER BY created_at DESC LIMIT 10`);
   const callIds = (currentCalls.rows as Array<{ id: string }>).map((r) => r.id);
   const calls = callIds.length
     ? await dbh.db.select().from(schema.calls).where(inArray(schema.calls.id, callIds))

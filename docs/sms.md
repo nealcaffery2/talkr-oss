@@ -8,6 +8,10 @@
 `apps/server/src/routes/messages.ts`, `apps/server/src/routes/webhooks-sms.ts`,
 and `apps/server/src/worker/sms-handlers.ts`.
 
+**iMessage and RCS** ride the same pipeline, off by default; channel
+selection, the `read` status and the Sendblue/RCS webhooks are in
+[messaging-channels.md](messaging-channels.md).
+
 Phase 4 is two-way conversational SMS for reps working leads: a shared
 Messages inbox, templated one-at-a-time sends, delivery tracking, and the
 compliance primitives (STOP/HELP/START, suppression, quiet hours) enforced on
@@ -156,19 +160,19 @@ behavior: "STOP", "stop.", " Stop " match; "please stop texting" does not.
 
 | Keywords | Action |
 |---|---|
-| STOP, STOPALL, UNSUBSCRIBE, CANCEL, END, QUIT | insert `suppression_records (scope org, channel sms, reason stop)`; send one opt-out confirmation auto-reply |
-| HELP, INFO | send the help auto-reply (org name + support contact) |
-| START, YES, UNSTOP | delete `channel='sms', reason='stop'` suppression rows for the number; send opt-in confirmation |
+| STOP, STOPALL, UNSUBSCRIBE, CANCEL, END, QUIT | insert `suppression_records (scope org, channel sms, reason stop)`; no reply from us (Telnyx sends the carrier-level STOP confirmation itself and returns 409 for anything we send to that number afterwards) |
+| HELP, INFO | nothing automatic; the message lands in the inbox and the rep answers |
+| START, YES, UNSTOP | delete `channel='sms', reason='stop'` suppression rows for the number; no automatic confirmation |
 
 - **START only reverses SMS keyword opt-outs.** A DNC disposition,
   complaint, or legal suppression (`channel 'all'` / other reasons) is not
   cleared by texting START; those still block sends. (Deliberate.)
-- **Auto-replies bypass quiet hours and the suppression gate** — they are
-  compliance responses to a message the recipient just sent (CTIA requires
-  the STOP confirmation and HELP response), not marketing. They are flagged
-  `is_auto_reply` and are exactly-once: created in the same transaction as
-  the inbound apply (itself gated by the SID unique) with job dedupe key
-  `sms-auto-reply:{inboundMessageId}`.
+- **No keyword auto-replies.** Talkr sends nothing back for STOP, HELP or
+  START: Telnyx handles the carrier-level STOP confirmation and blocks the
+  number, and a boilerplate HELP or START text reads as spam inside a thread
+  that is otherwise a person talking. The `is_auto_reply` flag on
+  `messages` stays for history (rows sent before 2026-10-28) and for any
+  future auto-reply that should bypass the suppression and quiet-hours gates.
 - **Suppression is enforced on every send**: `POST /v1/messages` rejects
   suppressed destinations with HTTP 422 `{"error":"suppressed"}`, and the
   send job re-checks at send time (a STOP can land between queue and send),

@@ -24,6 +24,7 @@ import type {
   AvailableNumber,
   CallControlResponse,
   CanonicalEvent,
+  CanonicalMessageEvent,
   CarrierNumber,
   ClientToken,
   ConferenceDialParams,
@@ -37,6 +38,7 @@ import type {
   PurchaseNumberParams,
   PurchasedNumber,
   RecordingFormat,
+  CarrierRecording,
   RecordingMedia,
   RecordingMediaRef,
   SearchNumbersParams,
@@ -91,6 +93,12 @@ export interface TelnyxConfig {
   /** Messaging profile used for outbound SMS/MMS. */
   messagingProfileId?: string;
   /**
+   * RCS agent id (TELNYX_RCS_AGENT_ID). Unset means no RCS: the adapter exposes
+   * no RCS methods' answers beyond "unsupported" and every text goes as SMS.
+   * Sends also need `messagingProfileId` (Telnyx requires it on /messages/rcs).
+   */
+  rcsAgentId?: string;
+  /**
    * SIP domain browser credentials are reachable at. Telnyx's shared domain by
    * default; a connection with its own subdomain overrides it.
    */
@@ -121,6 +129,15 @@ export interface TelnyxRestOverrides {
     mediaUrls?: string[];
     statusCallbackUrl?: string;
   }) => Promise<{ providerMessageId: string }>;
+  fetchMessage?: (providerMessageId: string) => Promise<CanonicalMessageEvent | null>;
+  sendRcsMessage?: (params: {
+    to: string;
+    body: string;
+    mediaUrl?: string;
+    smsFallbackFrom?: string;
+    statusCallbackUrl?: string;
+  }) => Promise<{ providerMessageId: string }>;
+  checkRcsCapability?: (to: string) => Promise<'supported' | 'unsupported' | 'unknown'>;
   createCall?: (params: CreatePstnCallParams) => Promise<{ providerCallId: string }>;
   cancelCall?: (providerCallId: string) => Promise<void>;
   addParticipant?: (params: AddParticipantParams) => Promise<ProviderParticipant>;
@@ -199,6 +216,9 @@ export class TelnyxVoiceProvider implements VoiceProvider, MessagingProvider, Nu
     credentials: () => `${API_BASE}/telephony_credentials`,
     credentialToken: (id: string) => `${API_BASE}/telephony_credentials/${id}/token`,
     messages: () => `${API_BASE}/messages`,
+    rcsMessages: () => `${API_BASE}/messages/rcs`,
+    rcsCapabilities: (agentId: string, phone: string) =>
+      `${API_BASE}/messaging/rcs/capabilities/${encodeURIComponent(agentId)}/${encodeURIComponent(phone)}`,
     message: (id: string) => `${API_BASE}/messages/${encodeURIComponent(id)}`,
     /** Number inventory (v2). Search, order, then the owned-number resource. */
     availableNumbers: (query: string) => `${API_BASE}/available_phone_numbers?${query}`,
@@ -289,6 +309,11 @@ export class TelnyxVoiceProvider implements VoiceProvider, MessagingProvider, Nu
 
   flattenMessageWebhook(endpoint: string, body: unknown): Record<string, string> | null {
     return flattenMessagingEvent(endpoint, body);
+  }
+
+  /** The configured RCS agent, or null when RCS is off for this deployment. */
+  get rcsAgentId(): string | null {
+    return this.config.rcsAgentId || null;
   }
 
   // ── Browser credentials ───────────────────────────────────────────────────
@@ -548,8 +573,10 @@ export class TelnyxVoiceProvider implements VoiceProvider, MessagingProvider, Nu
     return { contentType: CONTENT_TYPE, body: texml(message ? el('Say', {}, escapeInner(message)) : '') };
   }
 
-  buildRejectResponse(message?: string): CallControlResponse {
-    return { contentType: CONTENT_TYPE, body: texml(message ? el('Say', {}, escapeInner(message)) : '', el('Hangup')) };
+  /** Say the message (or play the recording when there is one), then hang up. */
+  buildRejectResponse(message?: string, audioUrl?: string | null): CallControlResponse {
+    const spoken = audioUrl ? greetingEl(message ?? '', audioUrl) : message ? el('Say', {}, escapeInner(message)) : '';
+    return { contentType: CONTENT_TYPE, body: texml(spoken, el('Hangup')) };
   }
 
   /**
@@ -577,9 +604,9 @@ export class TelnyxVoiceProvider implements VoiceProvider, MessagingProvider, Nu
     });
   }
 
-  /** AMD voicemail drop: say the org-configured message, then hang up. */
-  buildVoicemailDropResponse(message: string): CallControlResponse {
-    return { contentType: CONTENT_TYPE, body: texml(el('Say', {}, escapeInner(message)), el('Hangup')) };
+  /** AMD voicemail drop: play the rep's recording, or say the org-configured message, then hang up. */
+  buildVoicemailDropResponse(message: string, audioUrl?: string | null): CallControlResponse {
+    return { contentType: CONTENT_TYPE, body: texml(greetingEl(message, audioUrl ?? undefined), el('Hangup')) };
   }
 
   buildConferenceResponse(params: ConferenceDialParams): CallControlResponse {
@@ -588,6 +615,7 @@ export class TelnyxVoiceProvider implements VoiceProvider, MessagingProvider, Nu
       {
         startConferenceOnEnter: params.startConferenceOnEnter,
         endConferenceOnExit: params.endConferenceOnExit,
+        beep: false,
         statusCallback: params.statusCallbackUrl,
         statusCallbackMethod: 'POST',
         // 'hold' also delivers participant-unhold; 'join'/'leave' likewise.
@@ -596,6 +624,8 @@ export class TelnyxVoiceProvider implements VoiceProvider, MessagingProvider, Nu
         ...(params.record
           ? {
               record: 'record-from-start',
+              // The room starts when the seller answers, and Telnyx beeps the room as recording starts (default true).
+              recordBeep: false,
               recordingStatusCallback: params.recordingStatusCallbackUrl,
             }
           : {}),
@@ -669,6 +699,7 @@ export class TelnyxVoiceProvider implements VoiceProvider, MessagingProvider, Nu
     if (params.answerTexml) form.Texml = params.answerTexml;
     if (params.machineDetection) {
       form.MachineDetection = params.machineDetection === 'enable' ? 'Enable' : 'DetectMessageEnd';
+      if (params.machineDetectionTimeoutMs) form.MachineDetectionTimeout = String(params.machineDetectionTimeoutMs);
     }
     // Creating a call is the v2 surface, so JSON against the TeXML app. `To`
     // may be a SIP URI (`sip:gencred…@sip.telnyx.com`) — that is how the
@@ -769,9 +800,16 @@ export class TelnyxVoiceProvider implements VoiceProvider, MessagingProvider, Nu
           EndConferenceOnExit: String(params.endConferenceOnExit ?? false),
           Timeout: String(params.timeoutSeconds ?? 30),
           ...(params.muted !== undefined ? { Muted: String(params.muted) } : {}),
-          ...(params.beep !== undefined ? { Beep: String(params.beep) } : {}),
+          // Telnyx beeps the room on enter and exit unless told not to; the rep heard it when the seller answered.
+          Beep: String(params.beep ?? false),
           ...(params.coaching !== undefined ? { Coaching: String(params.coaching) } : {}),
           ...(params.callSidToCoach ? { CallSidToCoach: params.callSidToCoach } : {}),
+          ...(params.machineDetection
+            ? {
+                MachineDetection: params.machineDetection === 'enable' ? 'Enable' : 'DetectMessageEnd',
+                ...(params.amdStatusCallbackUrl ? { AmdStatusCallback: params.amdStatusCallbackUrl } : {}),
+              }
+            : {}),
         },
       },
     );
@@ -1032,6 +1070,34 @@ export class TelnyxVoiceProvider implements VoiceProvider, MessagingProvider, Nu
 
   // ── Media + messaging ─────────────────────────────────────────────────────
 
+  /** v2 recordings for a conference. `conference_id` is the room's own id, which the participant rows keep. */
+  async listConferenceRecordings(providerConferenceId: string): Promise<CarrierRecording[]> {
+    const query = new URLSearchParams({ 'filter[conference_id]': providerConferenceId, 'page[size]': '20' });
+    const body = await this.requestJson<{ data?: Array<Record<string, unknown>> }>(`${API_BASE}/recordings?${query}`, { method: 'GET' });
+    const str = (v: unknown): string | null => (typeof v === 'string' && v ? v : null);
+    const when = (v: unknown): Date | null => {
+      const d = str(v) ? new Date(str(v)!) : null;
+      return d && !Number.isNaN(d.getTime()) ? d : null;
+    };
+    return (body.data ?? []).flatMap((r) => {
+      const id = str(r.id);
+      if (!id) return [];
+      const urls = (r.download_urls ?? {}) as Record<string, unknown>;
+      const millis = typeof r.duration_millis === 'number' ? r.duration_millis : null;
+      const status = str(r.status) === 'completed' ? 'completed' : str(r.status) === 'failed' ? 'failed' : 'processing';
+      return [{
+        providerRecordingId: id,
+        status,
+        durationSeconds: millis == null ? null : Math.round(millis / 1000),
+        channels: str(r.channels) === 'dual' ? 2 : str(r.channels) === 'single' ? 1 : null,
+        providerUrl: str(urls.mp3) ?? str(urls.wav),
+        startedAt: when(r.recording_started_at),
+        endedAt: when(r.recording_ended_at),
+        raw: r,
+      } satisfies CarrierRecording];
+    });
+  }
+
   async fetchMedia(providerUrl: string): Promise<Uint8Array> {
     return (await this.fetchRecordingMedia({ providerUrl })).bytes;
   }
@@ -1158,6 +1224,99 @@ export class TelnyxVoiceProvider implements VoiceProvider, MessagingProvider, Nu
           ? { messaging_profile_id: this.config.messagingProfileId }
           : {}),
         ...(params.statusCallbackUrl ? { webhook_url: params.statusCallbackUrl } : {}),
+      },
+    });
+    return { providerMessageId: sent.data.id };
+  }
+
+  /**
+   * GET /v2/messages/{id}: the message as the carrier holds it, read as the
+   * `message.finalized` receipt it would have posted. The resource carries the
+   * same `to[0].status`, `errors` and `parts` the receipt does, so the flatten
+   * and normalize steps the webhook takes apply unchanged. Null on a 404.
+   */
+  async fetchMessage(providerMessageId: string): Promise<CanonicalMessageEvent | null> {
+    if (this.overrides.fetchMessage) return this.overrides.fetchMessage(providerMessageId);
+    const { status, text } = await this.request(this.paths.message(providerMessageId), { method: 'GET' });
+    if (status === 404) return null;
+    if (status < 200 || status >= 300) {
+      throw new TelnyxApiError(status, text, `Telnyx fetchMessage → ${status}`);
+    }
+    const payload = (JSON.parse(text) as { data?: Record<string, unknown> }).data;
+    if (!payload) return null;
+    const params = flattenMessagingEvent('sms-status', {
+      data: {
+        record_type: 'event',
+        event_type: 'message.finalized',
+        occurred_at: payload.completed_at ?? payload.sent_at,
+        payload,
+      },
+    });
+    if (!params) return null;
+    const event = normalizeTelnyxWebhook('sms-status', params)[0];
+    return event && event.type === 'message.status' ? (event as CanonicalMessageEvent) : null;
+  }
+
+  /**
+   * Whether `to` can receive RCS from our agent:
+   * GET /v2/messaging/rcs/capabilities/{agent_id}/{phone_number} answers the
+   * features the handset supports for that agent. Any feature at all means RCS
+   * works; an empty list or a 404 means it does not. Anything else (5xx, a
+   * timeout, an unexpected body) is `unknown`, and the caller sends SMS.
+   * LIVE-CHECK: the negative shape (empty `features` vs 404) is inferred from
+   * the API reference, not observed on a live agent.
+   */
+  async checkRcsCapability(to: string): Promise<'supported' | 'unsupported' | 'unknown'> {
+    if (this.overrides.checkRcsCapability) return this.overrides.checkRcsCapability(to);
+    const agentId = this.config.rcsAgentId;
+    if (!agentId) return 'unsupported';
+    try {
+      const { status, text } = await this.request(this.paths.rcsCapabilities(agentId, to), { method: 'GET' });
+      if (status === 404) return 'unsupported';
+      if (status < 200 || status >= 300) return 'unknown';
+      const features = (JSON.parse(text) as { data?: { features?: unknown } }).data?.features;
+      if (!Array.isArray(features)) return 'unknown';
+      return features.length > 0 ? 'supported' : 'unsupported';
+    } catch {
+      return 'unknown';
+    }
+  }
+
+  /**
+   * POST /v2/messages/rcs through the configured agent. `sms_fallback` makes
+   * Telnyx deliver the same text as SMS from our line when the handset turns
+   * out not to take RCS, so a stale capability answer still reaches the person.
+   */
+  async sendRcsMessage(params: {
+    to: string;
+    body: string;
+    mediaUrl?: string;
+    smsFallbackFrom?: string;
+    statusCallbackUrl?: string;
+  }): Promise<{ providerMessageId: string }> {
+    if (this.overrides.sendRcsMessage) return this.overrides.sendRcsMessage(params);
+    const agentId = this.config.rcsAgentId;
+    if (!agentId) throw new Error('RCS is not configured (TELNYX_RCS_AGENT_ID is unset)');
+    if (!this.config.messagingProfileId) {
+      throw new Error('RCS needs TELNYX_MESSAGING_PROFILE_ID (Telnyx requires messaging_profile_id on RCS sends)');
+    }
+    const contentMessage: Record<string, unknown> = params.mediaUrl
+      ? { content_info: { file_url: params.mediaUrl } }
+      : { text: params.body };
+    const sent = await this.requestJson<{ data: { id: string } }>(this.paths.rcsMessages(), {
+      method: 'POST',
+      json: {
+        agent_id: agentId,
+        to: params.to,
+        messaging_profile_id: this.config.messagingProfileId,
+        type: 'RCS',
+        agent_message: { content_message: contentMessage },
+        ...(params.statusCallbackUrl ? { webhook_url: params.statusCallbackUrl } : {}),
+        ...(params.smsFallbackFrom
+          ? params.mediaUrl
+            ? { mms_fallback: { from: params.smsFallbackFrom, text: params.body, media_urls: [params.mediaUrl] } }
+            : { sms_fallback: { from: params.smsFallbackFrom, text: params.body } }
+          : {}),
       },
     });
     return { providerMessageId: sent.data.id };

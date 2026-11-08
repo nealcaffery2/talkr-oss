@@ -85,6 +85,10 @@ const updateSchema = z
   .object({
     /** Empty string clears forwarding. */
     forward_to_e164: z.string().max(20).optional(),
+    /** Where the call goes when the rep does not pick up: an AI agent's line. Empty string clears it. */
+    overflow_to_e164: z.string().max(20).optional(),
+    /** How long the rep's browser rings before overflow or voicemail (5-60); null = the default 25. */
+    ring_timeout_seconds: z.number().int().min(5).max(60).nullable().optional(),
     label: z.string().max(60).nullable().optional(),
     /** null unassigns (the line becomes an org line). */
     assigned_user_id: z.string().uuid().nullable().optional(),
@@ -96,6 +100,12 @@ const updateSchema = z
      * owner. Call flows use a `last_contact` ring target instead.
      */
     route_callbacks_to_last_contact: z.boolean().optional(),
+    /** Send as iMessage (Sendblue) when the recipient has it. Needs SENDBLUE_* set. */
+    imessage_enabled: z.boolean().optional(),
+    /** The Sendblue line (E.164) this number's iMessage goes from; null = SENDBLUE_FROM_NUMBER. */
+    sendblue_from_number: z.string().regex(/^\+[1-9]\d{6,14}$/).nullable().optional(),
+    /** Send as RCS when the handset supports it. Needs TELNYX_RCS_AGENT_ID set. */
+    rcs_enabled: z.boolean().optional(),
   })
   .refine((v) => Object.keys(v).length > 0, { message: 'nothing to update' });
 
@@ -126,7 +136,12 @@ export function registerNumberRoutes(app: FastifyInstance, deps: AppDeps): void 
       assigned_user_id: n.assignedUserId,
       assigned_user_name: ownerName,
       forward_to_e164: n.forwardToE164,
+      overflow_to_e164: n.overflowToE164,
+      ring_timeout_seconds: n.ringTimeoutSeconds,
       route_callbacks_to_last_contact: n.routeCallbacksToLastContact,
+      imessage_enabled: n.imessageEnabled,
+      sendblue_from_number: n.sendblueFromNumber,
+      rcs_enabled: n.rcsEnabled,
       capabilities: n.capabilities,
       provider: n.provider,
       purchased_at: n.purchasedAt ? n.purchasedAt.toISOString() : null,
@@ -487,8 +502,24 @@ export function registerNumberRoutes(app: FastifyInstance, deps: AppDeps): void 
 
     const patch: Partial<NumberRow> = {};
     if (parsed.data.forward_to_e164 !== undefined) patch.forwardToE164 = parsed.data.forward_to_e164 || null;
+    if (parsed.data.overflow_to_e164 !== undefined) patch.overflowToE164 = parsed.data.overflow_to_e164 || null;
+    if (parsed.data.ring_timeout_seconds !== undefined) patch.ringTimeoutSeconds = parsed.data.ring_timeout_seconds;
     if (parsed.data.label !== undefined) patch.label = parsed.data.label;
     if (parsed.data.route_callbacks_to_last_contact !== undefined) patch.routeCallbacksToLastContact = parsed.data.route_callbacks_to_last_contact;
+    if (parsed.data.imessage_enabled !== undefined) patch.imessageEnabled = parsed.data.imessage_enabled;
+    if (parsed.data.rcs_enabled !== undefined) patch.rcsEnabled = parsed.data.rcs_enabled;
+    if (parsed.data.sendblue_from_number !== undefined) {
+      const sb = parsed.data.sendblue_from_number;
+      if (sb) {
+        const taken = (
+          await dbh.db.select({ id: schema.phoneNumbers.id }).from(schema.phoneNumbers).where(eq(schema.phoneNumbers.sendblueFromNumber, sb)).limit(1)
+        )[0];
+        if (taken && taken.id !== id) {
+          return reply.code(409).send({ error: 'sendblue_number_taken', message: 'Another line already sends iMessage from that Sendblue number' });
+        }
+      }
+      patch.sendblueFromNumber = sb ?? null;
+    }
     const reassign = parsed.data.assigned_user_id !== undefined && parsed.data.assigned_user_id !== current.assignedUserId;
     if (reassign) {
       const next = parsed.data.assigned_user_id;
@@ -524,6 +555,8 @@ export function registerNumberRoutes(app: FastifyInstance, deps: AppDeps): void 
       metadata: {
         forwarding_set: Boolean(row!.forwardToE164),
         route_callbacks_to_last_contact: parsed.data.route_callbacks_to_last_contact,
+        imessage_enabled: parsed.data.imessage_enabled,
+        rcs_enabled: parsed.data.rcs_enabled,
         from_user_id: reassign ? current.assignedUserId : undefined,
         to_user_id: reassign ? row!.assignedUserId : undefined,
       },

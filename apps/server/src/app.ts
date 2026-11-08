@@ -4,6 +4,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { sql } from 'drizzle-orm';
 import type { MessagingProvider, VoiceProvider } from '@talkr/core';
 import type { DbHandle } from '@talkr/db';
+import type { SendblueClient } from '@talkr/provider-sendblue';
 import type { Config } from './config.js';
 import type { Logger } from './logger.js';
 import type { PodioClient } from './services/podio.js';
@@ -13,6 +14,7 @@ import { registerV1Routes } from './routes/v1.js';
 import { registerAuthRoutes } from './routes/auth.js';
 import { registerSseRoutes } from './routes/sse.js';
 import { registerSmsWebhookRoutes } from './routes/webhooks-sms.js';
+import { registerSendblueWebhookRoutes } from './routes/webhooks-sendblue.js';
 import { registerMediaRoutes } from './routes/media.js';
 import { registerMessageRoutes } from './routes/messages.js';
 import { registerRecordingsRoutes } from './routes/recordings.js';
@@ -47,6 +49,11 @@ export interface AppDeps {
   logger: Logger;
   /** Outbound HTTP for the auth proxy; tests inject a fake GoTrue. */
   fetchImpl?: typeof fetch;
+  /**
+   * Sendblue (iMessage). Undefined builds it from SENDBLUE_* config; null is
+   * explicitly off. Tests inject a client with a fake transport.
+   */
+  sendblue?: SendblueClient | null;
   /** Trusted partner apps (env + partner_apps rows). Built here when absent. */
   partners?: PartnerRegistry;
   /**
@@ -176,6 +183,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   // SMS (Phase 4): webhook ingestion + inbox API. Registered after
   // registerV1Routes so its /v1 auth preHandler hook covers these routes.
   registerSmsWebhookRoutes(app, deps);
+  registerSendblueWebhookRoutes(app, deps);
   registerMessageRoutes(app, deps);
   // Recording playback + transcripts (docs/transcription.md): same /v1 auth hook.
   registerRecordingsRoutes(app, deps, { fetchRecordingMedia: deps.recordingMedia });

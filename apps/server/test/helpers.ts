@@ -25,6 +25,7 @@ import { buildApp, type AppDeps } from '../src/app.js';
 import type { Config } from '../src/config.js';
 import { signTestToken } from '../src/auth.js';
 import type { PodioClient } from '../src/services/podio.js';
+import type { SendblueClient } from '@talkr/provider-sendblue';
 import { JobRunner } from '../src/worker/runner.js';
 import { HANDLERS } from '../src/worker/handlers.js';
 import { seedDemoOrg, type SeedResult } from '../src/seed.js';
@@ -134,6 +135,12 @@ export async function createTestContext(
      * minting itself.
      */
     provisionCredentials?: boolean;
+    /** Sendblue client for iMessage tests (a fake transport); absent = off. */
+    sendblue?: SendblueClient | null;
+    /** RCS agent id handed to the Telnyx adapter (TELNYX_RCS_AGENT_ID). */
+    rcsAgentId?: string;
+    /** Extra Telnyx REST fakes, e.g. RCS send and capability answers. */
+    telnyxOverrides?: Partial<TelnyxRestOverrides>;
   } = {},
 ): Promise<TestContext> {
   const admin = new pg.Client({ connectionString: TEST_DATABASE_URL });
@@ -241,9 +248,11 @@ export async function createTestContext(
             accountId: 'telnyx-acct-test',
             texmlApplicationId: 'texml-app-test',
             sipConnectionId: 'sip-conn-test',
+            ...(opts.rcsAgentId ? { rcsAgentId: opts.rcsAgentId, messagingProfileId: 'mp-test' } : {}),
           },
           {
             ...fakes,
+            ...opts.telnyxOverrides,
             // No round-trip to Telnyx for a credential token in tests.
             mintClientToken: async (identity, ttlSeconds) => ({ token: `telnyx-fake-${identity}`, identity, ttlSeconds }),
             // Credentials persist like production (telephony_credentials) and
@@ -263,10 +272,12 @@ export async function createTestContext(
           },
         );
 
-  const deps: AppDeps = { config, dbh, provider, podio, logger, fetchImpl: opts.fetchImpl };
+  // Off unless a test brings a client: never built from config in tests.
+  const sendblue = opts.sendblue ?? null;
+  const deps: AppDeps = { config, dbh, provider, podio, logger, fetchImpl: opts.fetchImpl, sendblue };
   const app = buildApp(deps);
   const runner = new JobRunner(
-    { dbh, provider, podio, config, logger, fetchImpl: opts.fetchImpl },
+    { dbh, provider, podio, config, logger, fetchImpl: opts.fetchImpl, sendblue },
     HANDLERS,
     { backoffBaseMs: 0 },
   );

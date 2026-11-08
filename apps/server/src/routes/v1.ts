@@ -63,6 +63,8 @@ const createCallSchema = z.object({
   lead_id: z.string().uuid().optional(),
   /** Caller-ID pick for this call; must be an active number the org owns. */
   from_phone_number_id: z.string().uuid().optional(),
+  /** Answering-machine detection on the seller leg: a dialer session's call, never a hand-dialed one. */
+  amd: z.boolean().optional(),
 });
 
 const holdSchema = z.object({ hold: z.boolean() });
@@ -134,6 +136,7 @@ function mapServiceError(err: unknown, reply: FastifyReply): FastifyReply | null
     already_bound: 409,
     browser_leg_is_client: 409,
     number_protected: 429,
+    carrier_refused: 502,
   };
   return reply.code(status[err.code]).send({ error: err.code, message: err.message });
 }
@@ -293,6 +296,7 @@ export function registerV1Routes(app: FastifyInstance, deps: AppDeps): void {
         contactId: parsed.data.contact_id,
         leadId: parsed.data.lead_id,
         fromPhoneNumberId: parsed.data.from_phone_number_id,
+        amd: parsed.data.amd,
       });
       return reply.code(201).send({ call: serializeCall(call) });
     } catch (err) {
@@ -326,8 +330,23 @@ export function registerV1Routes(app: FastifyInstance, deps: AppDeps): void {
         : []
       ).map((c) => [c.id, c.displayName]),
     );
+    // A call never linked to a contact (placed from a CRM by number) is still
+    // someone's: the number names them when a contact carries it. Without this
+    // a rep's Recent list was ten phone numbers.
+    const other = (c: typeof rows[number]) => (c.direction === 'outbound' ? c.toNumber : c.fromNumber) ?? '';
+    const numbers = [...new Set(rows.filter((r) => !r.contactId).map(other).filter(Boolean))];
+    const nameByPhone = new Map(
+      (numbers.length
+        ? await dbh.db
+            .select({ phone: schema.contactPhones.phoneE164, displayName: schema.contacts.displayName })
+            .from(schema.contactPhones)
+            .innerJoin(schema.contacts, eq(schema.contacts.id, schema.contactPhones.contactId))
+            .where(and(eq(schema.contactPhones.orgId, ctx.orgId), inArray(schema.contactPhones.phoneE164, numbers)))
+        : []
+      ).map((c) => [c.phone, c.displayName]),
+    );
     return {
-      calls: rows.map((c) => serializeCall(c, c.contactId ? nameById.get(c.contactId) : null)),
+      calls: rows.map((c) => serializeCall(c, (c.contactId ? nameById.get(c.contactId) : null) ?? nameByPhone.get(other(c)) ?? null)),
     };
   });
 

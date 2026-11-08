@@ -76,6 +76,7 @@ for (const f of [
   'packages/core/package.json',
   'packages/db/package.json',
   'packages/provider-telnyx/package.json',
+  'packages/provider-sendblue/package.json',
 ]) {
   const pkg = JSON.parse(readFileSync(join(repo, f), 'utf8'));
   for (const [name, version] of Object.entries(pkg.dependencies ?? {})) {

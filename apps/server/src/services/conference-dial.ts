@@ -29,10 +29,11 @@
  * case where the fallback must be free to try again.
  */
 
-import { and, eq, isNull } from 'drizzle-orm';
+import { and, eq, isNull, ne } from 'drizzle-orm';
 import {
   callIdFromRoomName,
   customerParticipantParams,
+  wantsAmd,
   conferenceRoomName,
   shouldDialCustomer,
   type VoiceProvider,
@@ -120,6 +121,7 @@ export async function dialCustomerIntoConference(
         fromNumber: call.fromNumber,
         toNumber: call.toNumber,
         publicBaseUrl: config.PUBLIC_BASE_URL,
+        amd: wantsAmd(call.raw),
       }),
     );
   } catch (err) {
@@ -258,4 +260,52 @@ function sameNumber(a: string, b: string): boolean {
   const tail = (s: string) => s.replace(/\D/g, '').slice(-10);
   const x = tail(a);
   return x.length >= 7 && x === tail(b);
+}
+
+/**
+ * The conference-status `conference-end` hook.
+ *
+ * The seller is rung as a call of its own that joins the room only when they
+ * pick up. If the rep's leg leaves first (they hang up, or the browser drops
+ * it) while the seller is still ringing, the room ends without them, and the
+ * seller answered into dead air that stayed open until they hung up. Once the
+ * room is over, anyone still ringing into it is cancelled. Returns how many
+ * were. Non-fatal per party: one failed cancel does not stop the rest.
+ */
+export async function cancelRingingOnRoomEnd(
+  deps: CustomerDialDeps,
+  params: Record<string, string>,
+): Promise<number> {
+  const { dbh, provider, logger } = deps;
+  const callId = callIdFromRoomName(params.FriendlyName ?? '');
+  if (!callId) return 0;
+  const ringing = await dbh.db
+    .select({ id: schema.callParticipants.id, sid: schema.callParticipants.providerParticipantId })
+    .from(schema.callParticipants)
+    .where(
+      and(
+        eq(schema.callParticipants.callId, callId),
+        eq(schema.callParticipants.state, 'ringing'),
+        ne(schema.callParticipants.role, 'agent'),
+      ),
+    );
+  let cancelled = 0;
+  for (const p of ringing) {
+    if (!p.sid) continue;
+    try {
+      // Cancel is the verb for a ringing call; one that answered in the
+      // meantime refuses it and is hung up instead.
+      await provider.cancelCall(p.sid).catch(() => provider.hangupCall(p.sid!));
+      cancelled += 1;
+    } catch (err) {
+      logger.warn({ callId, participant: p.sid, err: (err as Error).message }, 'ringing party not cancelled at room end');
+      continue;
+    }
+    await dbh.db
+      .update(schema.callParticipants)
+      .set({ state: 'left', leftAt: new Date() })
+      .where(eq(schema.callParticipants.id, p.id));
+  }
+  if (cancelled) logger.info({ callId, cancelled }, 'ringing parties cancelled at room end');
+  return cancelled;
 }

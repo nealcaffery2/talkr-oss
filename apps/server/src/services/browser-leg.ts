@@ -41,6 +41,22 @@ export type BrowserLegResult = {
   providerCallId: string | null;
 };
 
+/** The carrier's own reason when its error body carries one (Telnyx `errors[0].detail`), else the message. */
+function carrierRefusal(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  const body = (err as { body?: unknown })?.body;
+  if (typeof body === 'string') {
+    try {
+      const parsed = JSON.parse(body) as { errors?: Array<{ detail?: string | null }> };
+      const detail = parsed.errors?.[0]?.detail;
+      if (detail) return `Carrier refused the browser leg: ${detail}`;
+    } catch {
+      /* not JSON */
+    }
+  }
+  return `Carrier refused the browser leg: ${message}`;
+}
+
 export async function ringBrowserForCall(
   dbh: DbHandle,
   provider: VoiceProvider,
@@ -97,15 +113,31 @@ export async function ringBrowserForCall(
     }).body;
   }
 
-  const dial = await provider.createCall({
-    from: call.fromNumber,
-    to: address,
-    answerUrl,
-    answerUrlMethod: 'POST',
-    answerTexml,
-    statusCallbackUrl: `${publicBaseUrl}/webhooks/telnyx/voice-status?call=${encodeURIComponent(call.id)}&leg=client`,
-    timeoutSeconds: 30,
-  });
+  let dial;
+  try {
+    dial = await provider.createCall({
+      from: call.fromNumber,
+      to: address,
+      answerUrl,
+      answerUrlMethod: 'POST',
+      answerTexml,
+      statusCallbackUrl: `${publicBaseUrl}/webhooks/telnyx/voice-status?call=${encodeURIComponent(call.id)}&leg=client`,
+      timeoutSeconds: 30,
+    });
+  } catch (err) {
+    // The carrier refused the dial outright (2026-10-27: Telnyx 403 "Busy
+    // Here D61, the user portal level doesn't allow this type of calls").
+    // Nothing will ever ring, so the call fails now with the carrier's words,
+    // instead of sitting "queued" and silent until the stuck-call sweep ends
+    // it ten minutes later.
+    const detail = carrierRefusal(err);
+    await dbh.db
+      .update(schema.calls)
+      .set({ status: 'failed', failureClass: 'platform_failure', failureDetail: detail, endedAt: new Date() })
+      .where(and(eq(schema.calls.id, call.id), eq(schema.calls.status, call.status)));
+    opts?.logger?.error({ callId: call.id, err: detail }, 'carrier refused the browser leg');
+    throw new CallServiceError('carrier_refused', detail);
+  }
   const providerCallId = dial.providerCallId || null;
   await dbh.db
     .update(schema.calls)

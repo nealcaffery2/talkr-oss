@@ -543,6 +543,8 @@ the extension has `npm run typecheck` and `npm run build` in its own folder.
 After a schema change in `packages/db/src/schema.ts`, generate a migration with
 `npm run db:generate`.
 
+iMessage (Sendblue) and RCS (Telnyx) are optional channels next to SMS, off until their keys are set and a line is switched on: [docs/messaging-channels.md](docs/messaging-channels.md), owner steps for RCS in [docs/rcs-setup.md](docs/rcs-setup.md).
+
 ## Contributing
 
 1. Open an issue describing the change before large work.

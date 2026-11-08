@@ -122,6 +122,9 @@ Chosen from the **real canonical vocabulary** (`packages/core/src/events.ts` / t
 | `call.canceled` | `call_events` | canceled before answer |
 | `recording.completed` | `call_events` | recording media ready ("recording ready") |
 | `disposition.created` | `audit_log` (`action='call.disposition'`) | a rep wrapped up a call |
+| `message.read` | `messages.read_at` (written with the receipt) | an iMessage or RCS message was read; `data` is the message resource with `status: "read"`, `read_at`, `channel` ([messaging-channels.md](messaging-channels.md) §5) |
+
+`call.overflow` is not in this table on purpose: it is sent synchronously by the inbound call control, before the caller is dialled on to a number's overflow line, to every subscription that listens for `call.no_answer` ([inbound-routing.md](inbound-routing.md) §11). Same headers and signature, delivered once, no retries.
 
 `disposition.created` is not a canonical telephony event (dispositions are human wrap-up, not provider events), so it is sourced from the append-only audit trail the disposition service already writes transactionally — same event-sourced discipline, no service edits.
 
@@ -185,7 +188,7 @@ These are session routes for the web app and partner UIs, not `tk_live_` public 
 | `GET /v1/numbers` | `calls.read.own` | The org's lines with owner names (caller-ID picker, settings) |
 | `GET /v1/numbers/available?area_code=210&limit=8` | `numbers.manage` | Carrier inventory; nothing reserved |
 | `POST /v1/numbers` `{phone_e164, assigned_user_id?, label?}` | `numbers.manage` | Buy at the carrier with inbound voice + SMS webhooks pointed at `PUBLIC_BASE_URL`; assigning to a rep with no default caller ID makes it theirs |
-| `PATCH /v1/numbers/:id` `{assigned_user_id?, label?, forward_to_e164?}` | `numbers.manage` | Reassign (moves the default caller ID with it), relabel, forward |
+| `PATCH /v1/numbers/:id` `{assigned_user_id?, label?, forward_to_e164?, overflow_to_e164?, ring_timeout_seconds?}` | `numbers.manage` | Reassign (moves the default caller ID with it), relabel, forward, no-answer overflow to an AI line and the ring window ([inbound-routing.md](inbound-routing.md) §11) |
 | `DELETE /v1/numbers/:id` | `numbers.manage` | Release at the carrier; the row stays as `released` so history keeps its number |
 | `POST /v1/transcription/token` | `calls.place` | 60-second Deepgram key for the browser's live transcript (`DEEPGRAM_API_KEY` + `DEEPGRAM_PROJECT_ID`) |
 | `POST /v1/calls/:id/intel` `{mode: live\|summary, turns[], context?, elapsed_seconds?}` | `calls.read.own` | Seller intelligence over the transcript so far (motivation, timeline, price expectation, objection, suggested response, next question, coaching) or the post-call card; `ANTHROPIC_API_KEY`, model `AI_SUMMARY_MODEL` |

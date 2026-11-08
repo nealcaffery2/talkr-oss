@@ -45,7 +45,8 @@ created_by, created_at, updated_at`. Unique `(org_id, name)`.
 | `maxAttemptsPerDay` | 2 | per-lead dial attempts per org-local day (clamped 1–6) |
 | `maxAttemptsTotal` | 8 | per-lead lifetime attempts in this campaign (clamped 1–30) |
 | `retryBackoffHours` | 4 | base for retry scheduling (§4), clamped 1–72 |
-| `parallelLines` | 2 | parallel-mode simultaneous dials, clamped 1–3 (**hard cap 3**) |
+| `parallelLines` | 2 | parallel-mode simultaneous dials, clamped 1–10 (**hard cap 10**; the abandonment cap below is what really throttles a rep) |
+| `amdVoicemailUrl` | — | https URL of the rep's recording; played instead of `amdVoicemailText` on a machine, and to a person who answers while the rep is already bridged (the abandon path) |
 | `abandonmentCapPercent` | 3 | abandonment cap, clamped to **≤3** — cannot be configured above the FTC guidance line |
 | `amdEnabled` | false | TeXML answering machine detection on REST dials (parallel mode) |
 | `amdAction` | `hangup` | `hangup` or `voicemail_drop` on machine detection |
@@ -181,7 +182,7 @@ still active and no call is in flight (a retry of the job after the call was
 created is a no-op).
 
 **Parallel** — N simultaneous PSTN dials for one rep (N = `parallelLines`,
-hard cap 3, further capped to 1 while `current_line_limit` is set). `next`
+hard cap 10, further capped to 1 while `current_line_limit` is set). `next`
 picks N distinct leads and REST-dials each (`provider.createCall`, new on the
 provider interface) with `?call=<id>&leg=pstn` status callbacks and an
 `answerUrl` of `/twiml/campaign-answer`. First answer wins:
@@ -304,14 +305,29 @@ call (manual dial) remains possible since voice consent was not revoked.
 | C7 | Parallel line count is hard-capped at 3 regardless of configuration. | core `resolveCampaignSettings` clamp test |
 | C8 | Predictive dialing cannot be activated: flag off ⇒ activation and session start refuse with `predictive_disabled`. | `dialer-session.test.ts` predictive refusal |
 | C9 | One active session per rep (partial unique index — DB-enforced). | `dialer-session.test.ts` |
-| C10 | No caller-ID rotation, DNC bypass, or carrier-limit evasion exists. Caller ID is one configured number per campaign (or the click-to-call default). | by construction — there is no code path to rotate |
+| C10 | Caller ID is always a number the org owns and has active: the campaign's pinned number when set, else the rep's own voice lines, local area code first, then the least-used over 7 days (§9). No spoofing, no DNC bypass, no carrier-limit evasion. | core `dialer.test.ts` pickRotatedCallerId cases |
+
+## 9. Caller ID on a session line
+
+`createOutboundCall` with a `campaignContext` and no `callerIdPhoneNumberId`
+asks `chooseCallerId` to rotate (`services/caller-id.ts`): the pool is the
+rep's own active voice lines; a line in the destination's area code wins,
+else the line with the fewest outbound calls in the trailing 7 days
+(`core pickRotatedCallerId`). A rep with no line of their own falls through
+to the click-to-call default. This is what CallTools calls a "least recent"
+strategy with local presence and JustCall a number pool: every line is one
+the org bought and registered, and the point is that one number does not
+carry a whole list. A campaign pin still wins when a manager sets one.
 
 ## 8. AMD (answering machine detection)
 
 Available on REST dials only (carrier constraint), i.e. parallel mode.
 `amdEnabled` sets `MachineDetection` on `calls.create` — `Enable` for the
 `hangup` action, `DetectMessageEnd` for `voicemail_drop` (so the drop lands
-after the greeting/beep). Telnyx then includes `AnsweredBy` on the answerUrl
+after the greeting/beep), with `MachineDetectionTimeout` capped at 6s: the
+carrier's 30s default held a quiet human in dead air for the whole wait (and
+abandoned every sibling line that answered meanwhile). A `not_sure` verdict
+at the cap is bridged like a human. Telnyx then includes `AnsweredBy` on the answerUrl
 request and on status callbacks; the adapter normalizes `AnsweredBy` into
 canonical call-event data (`data.answeredBy`, additive in
 `packages/provider-telnyx/src/normalize.ts` + `packages/core/src/events.ts`).

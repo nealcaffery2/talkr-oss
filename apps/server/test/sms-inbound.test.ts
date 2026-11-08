@@ -176,7 +176,7 @@ describe('inbound SMS', () => {
 });
 
 describe('CTIA keywords: STOP / HELP / START', () => {
-  it('STOP writes an sms suppression and sends the one confirmation auto-reply', async () => {
+  it('STOP writes an sms suppression and sends nothing back (the carrier confirms)', async () => {
     const sentBefore = ctx.sentMessages.length;
     await webhookPost(
       ctx,
@@ -191,21 +191,12 @@ describe('CTIA keywords: STOP / HELP / START', () => {
     expect(suppressions[0]!.reason).toBe('stop');
     expect(suppressions[0]!.scope).toBe('org');
 
-    // Exactly one confirmation, sent via the provider despite the fresh
-    // suppression (compliance auto-reply bypasses the gates).
-    expect(ctx.sentMessages.length).toBe(sentBefore + 1);
-    const confirmation = ctx.sentMessages.at(-1)!;
-    expect(confirmation.to).toBe(SELLER);
-    expect(confirmation.from).toBe(OUR_NUMBER);
-    expect(confirmation.body).toContain('unsubscribed');
-    expect(confirmation.body).toContain('START');
-
+    // Telnyx answers STOP itself and refuses anything else to that number,
+    // so no confirmation is queued or sent from here.
+    expect(ctx.sentMessages.length).toBe(sentBefore);
     const convo = (await conversationFor(SELLER))!;
-    const autoReply = (await messagesIn(convo.id)).at(-1)!;
-    expect(autoReply.direction).toBe('outbound');
-    expect(autoReply.isAutoReply).toBe(true);
-    expect(autoReply.status).toBe('sending');
-    expect(autoReply.providerMessageSid).toBe(confirmation.providerMessageId);
+    const last = (await messagesIn(convo.id)).at(-1)!;
+    expect(last.direction).toBe('inbound');
   });
 
   it('a duplicate STOP delivery does not double the suppression or the reply', async () => {
@@ -235,7 +226,7 @@ describe('CTIA keywords: STOP / HELP / START', () => {
     expect(queued).toHaveLength(0);
   });
 
-  it('HELP sends the help auto-reply with the org name', async () => {
+  it('HELP lands in the inbox and sends nothing automatic', async () => {
     const sentBefore = ctx.sentMessages.length;
     await webhookPost(
       ctx,
@@ -243,13 +234,14 @@ describe('CTIA keywords: STOP / HELP / START', () => {
       inboundSms({ sid: 'SM_help_1', from: SELLER, to: OUR_NUMBER, body: 'help' }),
     );
     await ctx.runner.drain();
-    expect(ctx.sentMessages.length).toBe(sentBefore + 1);
-    const reply = ctx.sentMessages.at(-1)!;
-    expect(reply.body).toContain('Your Company');
-    expect(reply.body).toContain('STOP');
+    expect(ctx.sentMessages.length).toBe(sentBefore);
+    const convo = (await conversationFor(SELLER))!;
+    const last = (await messagesIn(convo.id)).at(-1)!;
+    expect(last.direction).toBe('inbound');
+    expect(last.body).toBe('help');
   });
 
-  it('START clears the sms opt-out, confirms, and sending works again', async () => {
+  it('START clears the sms opt-out quietly, and sending works again', async () => {
     const sentBefore = ctx.sentMessages.length;
     await webhookPost(
       ctx,
@@ -259,9 +251,8 @@ describe('CTIA keywords: STOP / HELP / START', () => {
     await ctx.runner.drain();
 
     expect(await smsSuppressions(SELLER)).toHaveLength(0);
-    const confirmation = ctx.sentMessages.at(-1)!;
-    expect(ctx.sentMessages.length).toBe(sentBefore + 1);
-    expect(confirmation.body).toContain('resubscribed');
+    // No boilerplate confirmation: the rep answers in the thread.
+    expect(ctx.sentMessages.length).toBe(sentBefore);
 
     const res = await ctx.app.inject({
       method: 'POST',
@@ -397,5 +388,42 @@ describe('MMS media', () => {
     )[0]!;
     expect(msg.mediaUrls).toHaveLength(2);
     expect((msg.mediaUrls as string[])[0]).toContain('/Media/ME1');
+  });
+});
+
+describe('inbound SMS on a line nobody owns (a shared or AI agent line)', () => {
+  const POOL_NUMBER = '+15005550040';
+  const CALLED_BACK = '+16145550788'; // no contact/lead; the admin dialled them from the pool line
+  let pooledId: string;
+  beforeAll(async () => {
+    const { db } = ctx.dbh;
+    pooledId = (
+      await db.insert(schema.phoneNumbers).values({ orgId: ctx.seed.orgId, phoneE164: POOL_NUMBER, providerNumberId: 'PN_pool_sms', label: 'Shared pool', capabilities: { voice: true, sms: true, mms: false } }).returning()
+    )[0]!.id;
+    await db.insert(schema.calls).values({
+      orgId: ctx.seed.orgId, direction: 'outbound', status: 'completed', userId: ctx.seed.adminId,
+      phoneNumberId: pooledId, fromNumber: POOL_NUMBER, toNumber: CALLED_BACK, createdAt: new Date(Date.now() - 3_600_000),
+    });
+  });
+
+  it('goes to the rep who last called or texted that number', async () => {
+    const res = await webhookPost(ctx, '/webhooks/telnyx/inbound-sms', inboundSms({ sid: 'SM_pool_1', from: CALLED_BACK, to: POOL_NUMBER, body: 'Hey, you called me earlier' }));
+    expect(res.statusCode).toBe(200);
+    await ctx.runner.drain();
+    expect((await conversationFor(CALLED_BACK))!.assignedUserId).toBe(ctx.seed.adminId);
+  });
+
+  it('a stranger nobody reached stays unowned until a rep answers, then is theirs', async () => {
+    const NEW = '+16145550799';
+    await webhookPost(ctx, '/webhooks/telnyx/inbound-sms', inboundSms({ sid: 'SM_pool_2', from: NEW, to: POOL_NUMBER, body: 'Hey Morgan, pics did not come through' }));
+    await ctx.runner.drain();
+    expect((await conversationFor(NEW))!.assignedUserId).toBeNull();
+
+    const sent = await ctx.app.inject({
+      method: 'POST', url: '/v1/messages', headers: repAuth,
+      payload: { to_number: NEW, from_phone_number_id: pooledId, body: 'Resending now' },
+    });
+    expect(sent.statusCode).toBe(201);
+    expect((await conversationFor(NEW))!.assignedUserId).toBe(ctx.seed.repId);
   });
 });

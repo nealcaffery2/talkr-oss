@@ -86,6 +86,30 @@ describe('ring-all', () => {
     const events = await ctx.dbh.db.select().from(schema.callEvents).where(eq(schema.callEvents.callId, call.id));
     expect(events.some((e) => e.eventType === 'call.flow_path')).toBe(true);
   });
+
+  it('one rep’s browser answering busy does not end the call the others are still ringing on', async () => {
+    // 2026-10-27 20:54: Morgan's softphone was on another call and rejected the
+    // fork with 486; the inbound call was marked busy and ended, then David
+    // answered into a call already recorded as over.
+    const { voiceStatus } = await import('./fixtures/texml.js');
+    await saveFlow({ version: 2, start: 'all', nodes: { all: { type: 'ring', strategy: 'all', targets: [{ kind: 'everyone' }], timeout_seconds: 20, no_answer: null } } });
+    const res = await webhookPost(ctx, '/twiml/inbound', inbound('CA_flow_fork'));
+    expect(res.statusCode).toBe(200);
+    const call = await callBySid('CA_flow_fork');
+    const leg = (sid: string, status: 'busy' | 'in-progress', sequence: number) =>
+      webhookPost(ctx, `/webhooks/telnyx/voice-status?call=${call.id}&leg=client`, voiceStatus({ callSid: sid, status, sequence, parentCallSid: 'CA_flow_fork', to: 'sip:gencredrep1@sip.telnyx.com', direction: 'inbound' }));
+    await leg('CA_fork_tyler', 'busy', 2);
+    await ctx.runner.drain();
+    let [row] = await ctx.dbh.db.select().from(schema.calls).where(eq(schema.calls.id, call.id));
+    expect(row!.status).not.toBe('busy');
+    expect(row!.endedAt).toBeNull();
+
+    await leg('CA_fork_david', 'in-progress', 2);
+    await ctx.runner.drain();
+    [row] = await ctx.dbh.db.select().from(schema.calls).where(eq(schema.calls.id, call.id));
+    expect(row!.status).toBe('in_progress');
+    expect(row!.answeredAt).not.toBeNull();
+  });
 });
 
 describe('sequential with a personal-phone fallback', () => {

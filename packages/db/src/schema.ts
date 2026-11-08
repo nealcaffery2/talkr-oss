@@ -253,6 +253,28 @@ export const phoneNumbers = pgTable('phone_numbers', {
    * through (docs/inbound-routing.md §10, migration 0027).
    */
   routeCallbacksToLastContact: boolean('route_callbacks_to_last_contact').notNull().default(false),
+  /**
+   * Where a call goes when the rep does not pick up (or is not available):
+   * the AI agent that covers their team, set by CLOZR (migration 0029,
+   * docs/inbound-routing.md §11). Null: voicemail, as before.
+   */
+  overflowToE164: text('overflow_to_e164'),
+  /** How long the rep's browser rings on default routing; null = 25 seconds. */
+  ringTimeoutSeconds: integer('ring_timeout_seconds'),
+  /**
+   * Texts from this line go as iMessage (Sendblue) when the recipient has it
+   * and the deployment has SENDBLUE_* set; SMS otherwise (migration 0028,
+   * docs/messaging-channels.md).
+   */
+  imessageEnabled: boolean('imessage_enabled').notNull().default(false),
+  /**
+   * The Sendblue line this Talkr number sends iMessage from and receives it on.
+   * Null uses SENDBLUE_FROM_NUMBER. iMessage cannot leave from a Telnyx number,
+   * so the recipient sees this number on the blue bubbles.
+   */
+  sendblueFromNumber: text('sendblue_from_number').unique(),
+  /** Texts from this line go as RCS when TELNYX_RCS_AGENT_ID is set and the handset supports it. */
+  rcsEnabled: boolean('rcs_enabled').notNull().default(false),
   purchasedAt: ts('purchased_at'),
   releasedAt: ts('released_at'),
   createdAt: now(),
@@ -576,7 +598,7 @@ export const suppressionRecords = pgTable('suppression_records', {
   scope: text('scope').notNull().default('org'), // org|campaign
   campaignId: uuid('campaign_id'),
   channel: text('channel').notNull().default('all'), // voice|sms|all
-  reason: text('reason').notNull(), // stop|dnc_disposition|manual|complaint|legal
+  reason: text('reason').notNull(), // stop|dnc_disposition|manual|complaint|legal|not_textable
   source: text('source'),
   note: text('note'),
   createdAt: now(),
@@ -695,6 +717,8 @@ export const providerAccounts = pgTable('provider_accounts', {
 export const messageDirection = pgEnum('message_direction', ['outbound', 'inbound']);
 export const messageStatus = pgEnum('message_status', [
   'queued', 'sending', 'sent', 'delivered', 'undelivered', 'failed', 'received',
+  // iMessage / RCS read receipts (migration 0028, docs/messaging-channels.md).
+  'read',
 ]);
 
 export const messageTemplates = pgTable('message_templates', {
@@ -810,11 +834,28 @@ export const messages = pgTable('messages', {
   sentAt: ts('sent_at'),
   deliveredAt: ts('delivered_at'),
   failedAt: ts('failed_at'),
+  /** First read receipt (iMessage, RCS). SMS never sets it. */
+  readAt: ts('read_at'),
+  /** sms (SMS/MMS via Telnyx) | imessage (Sendblue) | rcs (Telnyx RCS). Migration 0028. */
+  channel: text('channel').notNull().default('sms'),
   createdAt: now(),
 }, (t) => [
   index('messages_conversation_idx').on(t.conversationId, t.createdAt),
   index('messages_org_created_idx').on(t.orgId, t.createdAt),
 ]);
+/**
+ * Whether a recipient can take iMessage or RCS, cached (migration 0028).
+ * Sendblue allows 30 lookups an hour per line, so every send cannot ask.
+ * Inconclusive answers are never stored: the next send asks again.
+ */
+export const channelCapabilities = pgTable('channel_capabilities', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  phoneE164: text('phone_e164').notNull(),
+  channel: text('channel').notNull(), // imessage | rcs
+  supported: boolean('supported').notNull(),
+  checkedAt: ts('checked_at').notNull().defaultNow(),
+}, (t) => [uniqueIndex('channel_capabilities_uq').on(t.phoneE164, t.channel)]);
+
 // ── Public API (Phase 10) ───────────────────────────────────────────────────
 // docs/public-api.md. API keys are secrets: only the SHA-256 hash is stored;
 // the prefix is display-only. Webhook signing secrets must stay recoverable

@@ -57,6 +57,7 @@ export function mapPublicError(err: unknown, reply: FastifyReply): FastifyReply 
       already_bound: 409,
       browser_leg_is_client: 409,
       number_protected: 429,
+      carrier_refused: 502,
     };
     return sendError(reply, status[err.code], err.code, err.message);
   }

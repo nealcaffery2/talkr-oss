@@ -3,6 +3,7 @@ import {
   conferenceRoomName,
   customerParticipantParams,
   shouldDialCustomer,
+  wantsAmd,
 } from '../src/conference.js';
 
 const TARGET = {
@@ -51,6 +52,18 @@ describe('customerParticipantParams', () => {
 
   it('ends the conference when the customer leaves', () => {
     expect(customerParticipantParams(TARGET).endConferenceOnExit).toBe(true);
+  });
+
+  it('runs no machine detection on a hand-dialed call, so the rep can leave a voicemail', () => {
+    expect(customerParticipantParams(TARGET).machineDetection).toBeUndefined();
+    expect(wantsAmd(null)).toBe(false);
+    expect(wantsAmd({ queueId: 'q' })).toBe(false);
+  });
+
+  it('detects a machine on a session call and posts the verdict to amd-status', () => {
+    const params = customerParticipantParams({ ...TARGET, amd: wantsAmd({ amd: true }) });
+    expect(params.machineDetection).toBe('detect_message_end');
+    expect(params.amdStatusCallbackUrl).toBe(`https://api.example.com/webhooks/telnyx/amd-status?call=${TARGET.callId}`);
   });
 
   it('is deterministic, so a retry produces byte-identical params', () => {

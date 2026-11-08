@@ -16,13 +16,28 @@ export const MESSAGE_STATUSES = [
   'undelivered',
   'failed',
   'received',
+  // The recipient opened it (iMessage via Sendblue, RCS via Telnyx). SMS never
+  // reports this; see docs/messaging-channels.md.
+  'read',
 ] as const;
 
 export type MessageStatus = (typeof MESSAGE_STATUSES)[number];
 
+/**
+ * How a message travelled. `sms` covers SMS and MMS through Telnyx's
+ * messaging profile; `imessage` is Sendblue; `rcs` is Telnyx RCS Business
+ * Messaging. A send that a provider downgraded to SMS reads `sms`.
+ */
+export const MESSAGE_CHANNELS = ['sms', 'imessage', 'rcs'] as const;
+export type MessageChannel = (typeof MESSAGE_CHANNELS)[number];
+
 export type MessageFailureClass = 'none' | 'carrier_failure' | 'platform_failure' | 'suppressed';
 
-/** Outbound delivery ranks. `received` is inbound-only and terminal. */
+/**
+ * Outbound delivery ranks. `received` is inbound-only and terminal. `read`
+ * sits above `delivered`: the one move a terminal status can still make is
+ * delivered → read, because a read receipt always follows delivery.
+ */
 const MESSAGE_RANK: Record<MessageStatus, number> = {
   queued: 0,
   sending: 1,
@@ -31,10 +46,11 @@ const MESSAGE_RANK: Record<MessageStatus, number> = {
   undelivered: 3,
   failed: 3,
   received: 3,
+  read: 4,
 };
 
 export function isTerminalMessageStatus(status: MessageStatus): boolean {
-  return MESSAGE_RANK[status] === 3;
+  return MESSAGE_RANK[status] >= 3;
 }
 
 /**
@@ -50,7 +66,27 @@ export function classifyMessageFailure(errorCode?: string | null): MessageFailur
   const n = Number(errorCode);
   if (Number.isNaN(n)) return 'carrier_failure';
   if (n >= 21000 && n < 22000) return 'platform_failure';
+  // Sendblue's four-digit codes (4000 validation, 4001 rate limit, 4002
+  // blacklisted, 4007-4010 pre-reply limits, 5000/5003/5509 its own server
+  // and rate windows) are request-side, not a handset or carrier refusing.
+  if (n >= 4000 && n < 6000) return 'platform_failure';
   return 'carrier_failure';
+}
+
+/**
+ * Codes that say the number itself can never take a text: a landline, a
+ * non-routable wireless number, or no such number. Retrying only burns the
+ * line's daily cap and its carrier reputation, so the number is suppressed
+ * for SMS the first time one comes back. Telnyx 40001 "Not routable" (landline
+ * or non-routable wireless) and 40012 invalid destination; Twilio 30006
+ * landline, 30005 unknown destination, 21614 not a mobile number. Spam
+ * blocks (Telnyx 40002/40003, Twilio 30007) are about the message, not the
+ * number, and stay retryable.
+ */
+const UNREACHABLE_DESTINATION_CODES = new Set(['40001', '40012', '30005', '30006', '21614']);
+
+export function isUnreachableDestination(errorCode?: string | null): boolean {
+  return !!errorCode && UNREACHABLE_DESTINATION_CODES.has(String(errorCode).trim());
 }
 
 export interface MessageSnapshot {
@@ -58,6 +94,8 @@ export interface MessageSnapshot {
   sentAt: Date | null;
   deliveredAt: Date | null;
   failedAt: Date | null;
+  /** Absent on snapshots built before read receipts existed; treated as null. */
+  readAt?: Date | null;
   errorCode: string | null;
   failureClass: MessageFailureClass;
 }
@@ -74,6 +112,7 @@ export interface MessageStateChange {
   sentAt?: Date;
   deliveredAt?: Date;
   failedAt?: Date;
+  readAt?: Date;
   errorCode?: string;
   failureClass?: MessageFailureClass;
   /** True when the event told us nothing new (safe no-op duplicate). */
@@ -108,9 +147,27 @@ export function reduceMessageStatus(
     change.failedAt = at;
     change.noop = false;
   }
+  if (event.status === 'read') {
+    if (snapshot.readAt == null) {
+      change.readAt = at;
+      change.noop = false;
+    }
+    // A read message was delivered, whether or not that receipt ever came.
+    const failed = snapshot.status === 'failed' || snapshot.status === 'undelivered';
+    if (!failed && snapshot.deliveredAt == null && change.deliveredAt == null) {
+      change.deliveredAt = at;
+      change.noop = false;
+    }
+  }
 
   if (isTerminalMessageStatus(snapshot.status)) {
     // Terminal is sticky: duplicates and stragglers backfill timestamps only.
+    // The one exception is delivered → read. A failed message that somehow
+    // reports a read keeps its failure; the timestamp alone records it.
+    if (snapshot.status === 'delivered' && event.status === 'read') {
+      change.status = 'read';
+      change.noop = false;
+    }
     return change;
   }
 
@@ -336,4 +393,90 @@ export function renderMessageBody(
     .replace(/(?<=\S)[ \t]{2,}/g, ' ')
     .replace(/(?<=\S) +([,.!?;:])/g, '$1')
     .trim();
+}
+
+
+// ---------------------------------------------------------------------------
+// Channel selection (docs/messaging-channels.md)
+//
+// iMessage (Sendblue) and RCS (Telnyx) are upgrades over SMS, never a
+// requirement: each is tried only when the deployment has its credentials,
+// the sending line has it switched on, and the recipient is known to support
+// it. Anything else, including a capability lookup that could not decide,
+// sends the way it always has: SMS through Telnyx.
+// ---------------------------------------------------------------------------
+
+/** What a capability lookup said about one recipient on one channel. */
+export type ChannelSupport = 'supported' | 'unsupported' | 'unknown';
+
+export interface ChannelSelectionInput {
+  /** Sendblue credentials are set for this deployment. */
+  imessageConfigured: boolean;
+  /** The sending line has iMessage switched on and a Sendblue number to send from. */
+  imessageLineEnabled: boolean;
+  /** TELNYX_RCS_AGENT_ID is set and the carrier adapter can send RCS. */
+  rcsConfigured: boolean;
+  /** The sending line has RCS switched on. */
+  rcsLineEnabled: boolean;
+  /** Attachments on the message. Sendblue and RCS carry at most one per message. */
+  mediaCount: number;
+}
+
+export interface ChannelSelection {
+  channel: MessageChannel;
+  /** Why this channel: logged with the send and kept for support questions. */
+  reason:
+    | 'imessage_supported'
+    | 'rcs_supported'
+    | 'not_configured'
+    | 'recipient_unsupported'
+    | 'capability_unknown'
+    | 'multiple_attachments';
+}
+
+/**
+ * The channels worth probing for this send, best first. Pure: says nothing
+ * about the recipient, so a send that cannot use iMessage or RCS never spends
+ * a capability lookup (Sendblue allows 30 an hour per line).
+ */
+export function channelCandidates(input: ChannelSelectionInput): Array<'imessage' | 'rcs'> {
+  if (input.mediaCount > 1) return [];
+  const out: Array<'imessage' | 'rcs'> = [];
+  if (input.imessageConfigured && input.imessageLineEnabled) out.push('imessage');
+  // RCS carries text or one file, not both; until the composer can say which
+  // a rep meant, a message with an attachment keeps its MMS path.
+  if (input.rcsConfigured && input.rcsLineEnabled && input.mediaCount === 0) out.push('rcs');
+  return out;
+}
+
+/**
+ * Pick the channel for one outbound message. `probe` answers whether the
+ * recipient supports a channel (cached lookups in the server); it is called
+ * only for candidates, in order, and stops at the first `supported`.
+ * A probe that throws counts as `unknown`: the message still goes, as SMS.
+ */
+export async function selectMessageChannel(
+  input: ChannelSelectionInput,
+  probe: (channel: 'imessage' | 'rcs') => Promise<ChannelSupport>,
+): Promise<ChannelSelection> {
+  const candidates = channelCandidates(input);
+  if (candidates.length === 0) {
+    const anyEnabled =
+      (input.imessageConfigured && input.imessageLineEnabled) || (input.rcsConfigured && input.rcsLineEnabled);
+    return { channel: 'sms', reason: anyEnabled && input.mediaCount > 1 ? 'multiple_attachments' : 'not_configured' };
+  }
+  let sawUnknown = false;
+  for (const channel of candidates) {
+    let support: ChannelSupport;
+    try {
+      support = await probe(channel);
+    } catch {
+      support = 'unknown';
+    }
+    if (support === 'supported') {
+      return { channel, reason: channel === 'imessage' ? 'imessage_supported' : 'rcs_supported' };
+    }
+    if (support === 'unknown') sawUnknown = true;
+  }
+  return { channel: 'sms', reason: sawUnknown ? 'capability_unknown' : 'recipient_unsupported' };
 }
